@@ -98,43 +98,112 @@ def sandbox(
         _check_budget_time(elapsed, budget)
 
         # Step 4: 获取 Baseline 评分（在原始工作区运行）
-        bench_mod = _load_benchmark()
-        if bench_mod is None:
-            return _error_result("benchmark.skill 加载失败", budget, elapsed)
+        # ASO: 如果存在 evals/aso_self_evals.json，使用 eval_runner 进行测试驱动评估
+        evals_file = os.path.join(workspace, "evals", "aso_self_evals.json")
+        use_eval = os.path.exists(evals_file)
 
-        baseline = bench_mod.run_suite(target)
-        budget_tokens_used += baseline.get("tokens_used", 0)
-        budget_cost = baseline.get("cost", 0.0)
-        _check_budget_tokens(budget_tokens_used, budget)
-        _check_budget_cost(budget_cost, budget)
+        if use_eval:
+            # 使用 ASO 的 eval_runner + delta_calculator 流程
+            import subprocess as _subprocess
+            import tempfile as _tempfile
+
+            # 4a. 运行 Baseline 评估（当前技能）
+            baseline_dir = _tempfile.mkdtemp(prefix="aso_baseline_")
+            try:
+                _subprocess.run([
+                    sys.executable,
+                    os.path.join(workspace, "optimizer", "eval_runner.py"),
+                    "--skill-path", workspace,
+                    "--evals", evals_file,
+                    "--output", baseline_dir
+                ], check=True, capture_output=True)
+                with open(os.path.join(baseline_dir, "benchmark.json")) as _bf:
+                    baseline_bench = json.load(_bf)
+            except Exception as _e:
+                return _error_result(f"Baseline eval_runner 失败: {_e}", budget, elapsed)
+
+            # 5. 已应用 Candidate（在 temp_dir）
+            # 6. 运行 Candidate 评估（临时副本技能）
+            candidate_dir = _tempfile.mkdtemp(prefix="aso_candidate_")
+            try:
+                _subprocess.run([
+                    sys.executable,
+                    os.path.join(workspace, "optimizer", "eval_runner.py"),
+                    "--skill-path", temp_dir,
+                    "--evals", evals_file,
+                    "--output", candidate_dir
+                ], check=True, capture_output=True)
+                with open(os.path.join(candidate_dir, "benchmark.json")) as _cf:
+                    candidate_bench = json.load(_cf)
+            except Exception as _e:
+                return _error_result(f"Candidate eval_runner 失败: {_e}", budget, elapsed, baseline_bench)
+
+            # 7. 计算 Delta（使用 skill-opt 的 delta_calculator 逻辑）
+            delta_result = _calc_delta(baseline_bench, candidate_bench)
+            comparison = {
+                "baseline": {
+                    "score": round(baseline_bench.get("pass_rate", {}).get("mean", 0.0) * 100, 2),
+                    "stability": 1.0,
+                    "runs": baseline_bench.get("total_tests", 1),
+                },
+                "candidate": {
+                    "score": round(candidate_bench.get("pass_rate", {}).get("mean", 0.0) * 100, 2),
+                    "stability": 1.0,
+                    "runs": candidate_bench.get("total_tests", 1),
+                },
+                "delta": delta_result["delta"],
+                "verdict": delta_result["verdict"],
+                "description": delta_result["description"],
+            }
+
+            # 更新预算使用（取两次评估的总 tokens 和 cost）
+            total_tokens = baseline_bench.get("tokens", {}).get("total", 0) + candidate_bench.get("tokens", {}).get("total", 0)
+            total_cost = baseline_bench.get("cost", 0.0) + candidate_bench.get("cost", 0.0)
+            budget_tokens_used += total_tokens
+            budget_cost += total_cost
+            _check_budget_tokens(budget_tokens_used, budget)
+            _check_budget_cost(budget_cost, budget)
+
+        else:
+            # 传统 trace-based benchmark
+            bench_mod = _load_benchmark()
+            if bench_mod is None:
+                return _error_result("benchmark.skill 加载失败", budget, elapsed)
+
+            baseline = bench_mod.run_suite(target)
+            budget_tokens_used += baseline.get("tokens_used", 0)
+            budget_cost = baseline.get("cost", 0.0)
+            _check_budget_tokens(budget_tokens_used, budget)
+            _check_budget_cost(budget_cost, budget)
 
         # Step 5: 在临时副本上应用 Candidate
         app_result = _apply_candidate(candidate, target, temp_dir)
         if not app_result["success"]:
             return _error_result(
                 "应用 Candidate 失败: " + app_result.get("error", ""),
-                budget, elapsed, baseline
+                budget, elapsed, baseline if not use_eval else baseline_bench
             )
 
         # Step 6: 在隔离副本上运行 Candidate Benchmark
-        # 切换 sys.path 到临时目录
-        old_path = list(__import__("sys").path)
-        try:
-            __import__("sys").path.insert(0, temp_dir)
-            candidate_mod = _load_benchmark_from(temp_dir)
-            if candidate_mod:
-                candidate_result = candidate_mod.run_suite(target)
-            else:
-                candidate_result = bench_mod.run_suite(target)
-        finally:
-            __import__("sys").path = old_path
+        if not use_eval:
+            # 切换 sys.path 到临时目录
+            old_path = list(__import__("sys").path)
+            try:
+                __import__("sys").path.insert(0, temp_dir)
+                candidate_mod = _load_benchmark_from(temp_dir)
+                if candidate_mod:
+                    candidate_result = candidate_mod.run_suite(target)
+                else:
+                    candidate_result = bench_mod.run_suite(target)
+            finally:
+                __import__("sys").path = old_path
 
-        budget_tokens_used += candidate_result.get("tokens_used", 0)
-        budget_cost += candidate_result.get("cost", 0.0)
-        _check_budget_cost(budget_cost, budget)
+            budget_tokens_used += candidate_result.get("tokens_used", 0)
+            budget_cost += candidate_result.get("cost", 0.0)
+            _check_budget_cost(budget_cost, budget)
 
-        # Step 7: 对比
-        comparison = bench_mod.compare(baseline, candidate_result)
+            # Step 7: 对比
+            comparison = bench_mod.compare(baseline, candidate_result)
 
         # Step 8: 回滚到原始状态
         _rollback(snap)
