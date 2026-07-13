@@ -1,0 +1,13 @@
+{
+  "with_skill": {
+    "pass_rate": {
+      "mean": 0.85
+    },
+    "time_seconds": {
+      "mean": 1.1
+    },
+    "tokens": {
+      "mean": 1005
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "without_skill": {
+    "pass_rate": {
+      "mean": 0.5
+    },
+    "time_seconds": {
+      "mean": 1.0
+    },
+    "tokens": {
+      "mean": 1000
+    }
+  },
+  "with_skill": {
+    "pass_rate": {
+      "mean": 0.8
+    },
+    "time_seconds": {
+      "mean": 1.0
+    },
+    "tokens": {
+      "mean": 1000
+    }
+  }
+}

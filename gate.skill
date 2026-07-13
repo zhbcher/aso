@@ -1,231 +1,116 @@
-# evolution/gate.skill — Evolution Verification Gate (P2.2)
-# 职责: 在 generate 和 deploy 之间验证 candidate 的合法性
-# 类型: Skill (OpenClaw Plugin)
+"""gate.skill — Candidate verification with strict scope lock."""
 
+from __future__ import annotations
+
+import ast
 import os
 import re
-import ast
 import sys
 
-# Add _lib to import path
-_lib_dir = os.path.join(os.path.dirname(__file__), "_lib")
+_lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_lib")
 if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
+from scope_policy import validate_target, denied_substrings, validate_sandbox_path
+
+_REQUIRED_KEYS = ("type", "mechanism", "changes", "risk", "description")
+_VALID_ACTIONS = {
+    "integrate_mechanism",
+    "modify_search_loop",
+    "add_step",
+    "reduce",
+    "modify_skill_file",
+}
+_PY_EXTS = (".py", ".skill")
 
 
 def verify(candidate: dict, target: str) -> dict:
-    """
-    验证 Candidate 是否合法，是否可以部署。
-
-    检查项:
-    1. 候选方案结构完整性
-    2. Scope Lock 合规性
-    3. 变更语法正确性
-    4. 风险等级合理性
-    5. Trace Schema 兼容性（如果适用）
-
-    Args:
-        candidate: generator 输出的候选方案 dict
-        target:    演化目标
-
-    Returns:
-        dict: {passed: bool, checks: list[dict], summary: str}
-    """
-    checks = []
-
-    # Check 1: 候选方案结构完整性
-    check1 = _check_structure(candidate)
-    checks.append(check1)
-
-    # Check 2: Scope Lock 合规性
-    check2 = _check_scope_lock(candidate, target)
-    checks.append(check2)
-
-    # Check 3: 变更语法
-    check3 = _check_changes(candidate)
-    checks.append(check3)
-
-    # Check 4: 风险等级
-    check4 = _check_risk(candidate)
-    checks.append(check4)
-
-    # Check 5: 机制描述完整性
-    check5 = _check_mechanism(candidate)
-    checks.append(check5)
-
-    passed = all(c.get("passed", False) for c in checks)
-    total = len(checks)
-    passed_count = sum(1 for c in checks if c.get("passed", False))
-
+    checks = [
+        _check_structure(candidate),
+        _check_scope_lock(candidate, target),
+        _check_changes(candidate),
+        _check_risk(candidate),
+        _check_mechanism(candidate),
+    ]
+    passed = all(item["passed"] for item in checks)
     return {
         "passed": passed,
-        "total": total,
-        "passed_count": passed_count,
-        "failed_count": total - passed_count,
+        "total": len(checks),
+        "passed_count": sum(1 for item in checks if item["passed"]),
+        "failed_count": sum(1 for item in checks if not item["passed"]),
         "checks": checks,
-        "summary": f"验证 {'通过' if passed else '不通过'}: {passed_count}/{total} 检查通过",
+        "summary": f"Validation {'passed' if passed else 'failed'}: {sum(1 for item in checks if item['passed'])}/{len(checks)}",
     }
 
 
 def _check_structure(candidate: dict) -> dict:
-    """检查候选方案结构完整性"""
-    required_keys = ["type", "mechanism", "changes", "risk", "description"]
-    missing = [k for k in required_keys if k not in candidate]
-
+    missing = [key for key in _REQUIRED_KEYS if key not in candidate]
     return {
-        "name": "候选方案结构完整性",
+        "name": "structure",
         "passed": len(missing) == 0,
-        "detail": f"缺失字段: {', '.join(missing)}" if missing else "所有必填字段存在",
+        "detail": f"Missing fields: {', '.join(missing)}" if missing else "OK",
     }
 
 
 def _check_scope_lock(candidate: dict, target: str) -> dict:
-    """检查 Scope Lock 合规性，从 evolution-policy.yaml 读取 deny 列表"""
+    if not validate_target(target):
+        return {"name": "scope_lock", "passed": False, "detail": f"Target '{target}' is denied by policy"}
     changes = candidate.get("changes", [])
-
-    # 从 evolution-policy.yaml 读取 deny 列表
-    restricted_targets = _load_deny_list()
-    # fallback 默认值
-    if not restricted_targets:
-        restricted_targets = ["runtime", "gateway", "scheduler", "kernel",
-                             "evolution-policy.yaml"]
-
     violations = []
     for change in changes:
-        target_module = change.get("target_module", "")
-        if target_module in restricted_targets or any(
-            rt in target_module for rt in restricted_targets
-        ):
+        target_module = change.get("target_module") or change.get("skill_name") or target
+        if any(token in target_module for token in denied_substrings()):
             violations.append(target_module)
-
     return {
-        "name": "Scope Lock 合规性",
+        "name": "scope_lock",
         "passed": len(violations) == 0,
-        "detail": f"越权修改: {', '.join(violations)}" if violations else "未越权",
+        "detail": f"Restricted modules touched: {', '.join(violations)}" if violations else "OK",
     }
 
 
-def _load_deny_list() -> list:
-    """从 evolution-policy.yaml 读取 deny 列表
-
-    P2-J fix: Use regex-based parsing for the fallback YAML parser
-    instead of indentation-dependent line matching.
-    """
-    policy_path = os.path.join(os.path.dirname(__file__), "evolution-policy.yaml")
-    if not os.path.exists(policy_path):
-        return []
-
-    try:
-        import yaml
-        with open(policy_path) as f:
-            policy = yaml.safe_load(f)
-        if isinstance(policy, dict):
-            return policy.get("policy", {}).get("deny", [])
-    except ImportError:
-        pass
-    except Exception:
-        pass
-
-    # P2-J fix: Regex-based fallback parser (robust against indentation variations)
-    try:
-        with open(policy_path) as f:
-            content = f.read()
-
-        # Find the deny: section and extract list items
-        # Match "deny:" followed by list items "- value"
-        deny_match = re.search(
-            r'^deny:\s*\n((?:\s+-\s+\S+.*\n?)*)',
-            content, re.MULTILINE
-        )
-        if deny_match:
-            items = re.findall(r'^\s+-\s+(\S+)', deny_match.group(1), re.MULTILINE)
-            return items
-        return []
-    except Exception:
-        return []
-
-
 def _check_changes(candidate: dict) -> dict:
-    """检查变更语法正确性
-
-    P0-B fix: For modify_skill_file changes, validate new_content Python syntax
-    using ast.parse() to prevent deploying syntactically broken code that could
-    lock up the system.
-    """
-    changes = candidate.get("changes", [])
+    changes = candidate.get("changes")
     if not isinstance(changes, list):
-        return {"name": "变更语法", "passed": False, "detail": "changes 不是数组"}
-
-    valid_actions = ["integrate_mechanism", "modify_search_loop",
-                     "add_step", "reduce", "modify_skill_file"]
+        return {"name": "change_syntax", "passed": False, "detail": "changes is not a list"}
     issues = []
-
-    for i, change in enumerate(changes):
-        action = change.get("action", "")
+    for idx, change in enumerate(changes):
+        action = change.get("action")
         if not action:
-            issues.append(f"changes[{i}] 缺少 action 字段")
-        elif action not in valid_actions:
-            issues.append(f"changes[{i}] 未知 action: {action}")
-
-        # P0-B fix: Syntax validation for modify_skill_file
+            issues.append(f"changes[{idx}] missing action")
+        elif action not in _VALID_ACTIONS:
+            issues.append(f"changes[{idx}] unknown action: {action}")
         if action == "modify_skill_file":
             new_content = change.get("new_content", "")
             file_path = change.get("file_path", "")
-
-            if new_content and file_path:
-                # Only validate Python files (.skill, .py)
-                _, ext = os.path.splitext(file_path)
-                if ext in (".py", ".skill"):
-                    try:
-                        ast.parse(new_content)
-                    except SyntaxError as e:
-                        issues.append(
-                            f"changes[{i}] modify_skill_file new_content 语法错误 "
-                            f"(行 {e.lineno}): {e.msg}"
-                        )
-
+            _, ext = os.path.splitext(file_path)
+            if ext in _PY_EXTS and new_content:
+                try:
+                    ast.parse(new_content)
+                except SyntaxError as exc:
+                    issues.append(f"changes[{idx}] syntax error line {exc.lineno}: {exc.msg}")
     return {
-        "name": "变更语法正确性",
+        "name": "change_syntax",
         "passed": len(issues) == 0,
-        "detail": "; ".join(issues) if issues else "所有变更格式正确",
+        "detail": "; ".join(issues) if issues else "OK",
     }
 
 
 def _check_risk(candidate: dict) -> dict:
-    """检查风险等级合理性"""
     risk = candidate.get("risk", "unknown")
     if risk not in ("low", "medium", "high"):
-        return {
-            "name": "风险等级",
-            "passed": False,
-            "detail": f"无效风险等级: {risk}",
-        }
-
-    score = candidate.get("expected_improvement", "")
-    issues = []
-    if risk == "high" and not score:
-        issues.append("高风险但无预期改善说明")
-
-    return {
-        "name": "风险等级合理",
-        "passed": len(issues) == 0,
-        "detail": f"风险: {risk}" if not issues else "; ".join(issues),
-    }
+        return {"name": "risk", "passed": False, "detail": f"Invalid risk level: {risk}"}
+    if risk == "high" and not candidate.get("expected_improvement"):
+        return {"name": "risk", "passed": False, "detail": "High risk without improvement rationale"}
+    return {"name": "risk", "passed": True, "detail": f"{risk}"}
 
 
 def _check_mechanism(candidate: dict) -> dict:
-    """检查机制描述完整性"""
-    mechanism = candidate.get("mechanism", "")
-    description = candidate.get("description", "")
-
     issues = []
-    if not mechanism:
-        issues.append("缺少 mechanism 字段")
-    if not description or len(description) < 10:
-        issues.append("描述不完整")
-
+    if not candidate.get("mechanism"):
+        issues.append("mechanism missing")
+    if not candidate.get("description") or len(candidate.get("description", "")) < 10:
+        issues.append("description missing or too short")
     return {
-        "name": "机制描述完整性",
+        "name": "mechanism",
         "passed": len(issues) == 0,
-        "detail": "; ".join(issues) if issues else f"机制: {mechanism}",
+        "detail": "; ".join(issues) if issues else f"mechanism: {candidate.get('mechanism', '')}",
     }

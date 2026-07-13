@@ -1,88 +1,102 @@
 #!/usr/bin/env python3
-"""
-ASO (Automatic Skill Optimizer): Convert evolve trace failures into skill-opt evals.
+"""trace_to_eval.py — Convert failed/noteworthy ASO traces into eval cases."""
 
-This script reads the trace_store.json from evolve, identifies failed or suboptimal
-runs, and generates test cases in the skill-opt evals format.
-"""
+from __future__ import annotations
+
+import argparse
 import json
 import sys
-from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-def load_trace(trace_path="state/trace_store.json"):
-    with open(trace_path) as f:
-        return json.load(f)
 
-def convert_trace_to_evals(trace_data, skill_name=None):
-    """
-    Convert trace entries into skill-opt eval format.
-    We focus on:
-      - Cases with 'failed' flag
-      - Cases with high token usage (optional threshold)
-      - Cases with low success rate
-    """
-    evals = []
-    if "entries" not in trace_data:
-        return evals
+def load_trace(trace_path: str | Path) -> Any:
+    path = Path(trace_path)
+    if not path.exists():
+        raise FileNotFoundError(f"trace file not found: {path}")
+    return json.loads(path.read_text(encoding="utf-8"))
 
-    for entry in trace_data["entries"]:
-        # Only convert failures or notable warnings
+
+def convert_trace_to_evals(trace_data: dict[str, Any], skill_name: str | None = None) -> list[dict[str, Any]]:
+    """Convert failure / warning traces into eval cases."""
+    entries = trace_data.get("entries")
+    if not entries:
+        return []
+
+    cases: list[dict[str, Any]] = []
+    for entry in entries:
         if not entry.get("failed") and not entry.get("warning"):
             continue
 
-        test_id = f"aso-trace-{entry['id']}"
         prompt = entry.get("prompt", "")
-        expected = entry.get("expected_output", "")
-        actual = entry.get("actual_output", "")
+        assertions: list[str] = []
+        assertion_severity = "medium"
 
-        # Build assertions based on failure type
-        assertions = []
+        error = (entry.get("error") or "").lower()
         if entry.get("failed"):
-            assertions.append("Output must match expected exactly")
-        if "timeout" in entry.get("error", "").lower():
+            assertions.append("Output must match expected output")
+            assertion_severity = "high"
+        if "timeout" in error:
             assertions.append("Response must arrive within timeout")
-        if "token" in entry.get("error", "").lower():
-            assertions.append("Token consumption must be within limit")
+        if "token" in error:
+            assertions.append("Token consumption must be within budget")
 
-        eval_case = {
-            "id": test_id,
-            "description": f"Auto-generated from trace: {entry.get('context', 'unknown')}",
+        cases.append({
+            "id": f"aso-trace-{entry.get('id', 'unknown')}",
+            "description": entry.get("context") or "Auto-generated from ASO trace",
             "prompt": prompt,
-            "files": [],  # TODO: attach referenced files if present
+            "files": [],
             "setup": {
                 "skill_name": skill_name,
-                "trace_id": entry["id"]
+                "trace_id": entry.get("id"),
             },
             "expected_output": {
                 "should_contain": [],
                 "should_not_contain": [],
-                "exact_match": expected
             },
             "assertions": assertions,
-            "severity": "high" if entry.get("failed") else "medium"
-        }
-        evals.append(eval_case)
+            "severity": assertion_severity,
+        })
 
-    return evals
+    return cases
 
-def main():
-    skill_name = sys.argv[1] if len(sys.argv) > 1 else None
-    trace_path = Path("state/trace_store.json")
-    if not trace_path.exists():
-        print(f"Trace file not found: {trace_path}", file=sys.stderr)
-        sys.exit(1)
 
-    trace_data = load_trace(trace_path)
-    evals = convert_trace_to_evals(trace_data, skill_name)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="trace_to_eval",
+        description="Convert failed ASO traces into skill-opt eval cases.",
+    )
+    parser.add_argument("--skill-name", help="Target skill name for eval case metadata")
+    parser.add_argument("--input", default="state/trace_store.json", help="Path to ASO trace store")
+    parser.add_argument("--output", default="evals/aso_self_evals.json", help="Output eval cases path")
+    parser.add_argument("--help", action="help", help="Show this help message")
 
-    out_path = Path("evals/trace_based_evals.json")
+    args = parser.parse_args(argv)
+
+    try:
+        trace_data = load_trace(args.input)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    cases = convert_trace_to_evals(trace_data, skill_name=args.skill_name)
+    out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w") as f:
-        json.dump(evals, f, indent=2, ensure_ascii=False)
+    out_path.write_text(
+        json.dumps(cases, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
-    print(f"Generated {len(evals)} eval cases to {out_path}")
+    print(
+        json.dumps({
+            "status": "ok",
+            "created": len(cases),
+            "output": str(out_path),
+        }),
+        flush=True,
+    )
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
