@@ -2,148 +2,149 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-"""
-Delta Calculator for Skill Optimizer.
 
-This script computes performance deltas between baseline and new benchmark results.
-It supports two modes:
-  --init    : Initialize baseline.json from skill directory (placeholder)
-  --compare : Compare new benchmark.json against baseline and output delta
+"""Delta calculator for ASO / skill-opt.
 
-Output is always JSON to stdout.
-
-Example:
-  python delta_calculator.py --init --skill-path ./my-skill
-  python delta_calculator.py --compare --new-result ./workspace/iteration-1/benchmark.json
+Compares a new benchmark result against baseline(s) and emits a JSON delta
+with pass-rate, token, and time changes plus an overall verdict.
 """
 
-import json
+from __future__ import annotations
+
 import argparse
+import json
 import sys
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
 
-def safe_mean(data: Dict[str, Any]) -> float:
+
+def _safe_mean(data: dict[str, Any]) -> float:
     """Extract mean value from benchmark data structure."""
-    if not data:
-        return 0.0
-    return float(data.get("mean", 0.0))
+    return float(data.get("mean", 0.0)) if data else 0.0
+
 
 def compute_delta(
-    baseline_with: Dict[str, Any],
-    baseline_without: Dict[str, Any],
-    new_with: Dict[str, Any]
-) -> Dict[str, Any]:
+    baseline_with: dict[str, Any],
+    new_with: dict[str, Any],
+    baseline_without: dict[str, Any],
+) -> dict[str, Any]:
+    """Compute performance deltas.
+
+    Returns a dict with pass-rate, token, and time deltas, plus a verdict.
     """
-    Compute performance deltas.
+    new_pass = _safe_mean(new_with.get("pass_rate", {}))
+    old_pass = _safe_mean(baseline_with.get("pass_rate", {}))
+    base_pass = _safe_mean(baseline_without.get("pass_rate", {}))
 
-    Returns dict with:
-      - pass_rate_vs_without: improvement vs no-skill baseline
-      - pass_rate_vs_old: change vs previous skill version
-      - tokens_vs_old_pct: token change percentage
-      - time_vs_old_pct: time change percentage
-      - verdict: "improved" | "failed" | "neutral"
-    """
-    new_pass = safe_mean(new_with.get("pass_rate", {}))
-    old_pass = safe_mean(baseline_with.get("pass_rate", {}))
-    base_pass = safe_mean(baseline_without.get("pass_rate", {}))
+    new_tokens = _safe_mean(new_with.get("tokens", {}))
+    old_tokens = _safe_mean(baseline_with.get("tokens", {}))
 
-    new_tokens = safe_mean(new_with.get("tokens", {}))
-    old_tokens = safe_mean(baseline_with.get("tokens", {}))
-    new_time = safe_mean(new_with.get("time_seconds", {}))
-    old_time = safe_mean(baseline_with.get("time_seconds", {}))
+    new_time = _safe_mean(new_with.get("time_seconds", {}))
+    old_time = _safe_mean(baseline_with.get("time_seconds", {}))
 
-    # Compute deltas
-    delta = {
+    delta: dict[str, Any] = {
         "pass_rate_vs_without": new_pass - base_pass,
         "pass_rate_vs_old": new_pass - old_pass,
-        "tokens_vs_old_pct": ((new_tokens - old_tokens) / old_tokens * 100) if old_tokens != 0 else 0,
-        "time_vs_old_pct": ((new_time - old_time) / old_time * 100) if old_time != 0 else 0,
+        "tokens_vs_old_pct": (
+            ((new_tokens - old_tokens) / old_tokens) * 100 if old_tokens != 0 else 0.0
+        ),
+        "time_vs_old_pct": (
+            ((new_time - old_time) / old_time) * 100 if old_time != 0 else 0.0
+        ),
     }
 
-    # Verdict logic
     if delta["pass_rate_vs_old"] <= 0 and delta["tokens_vs_old_pct"] > 20:
-        verdict = "failed"
+        delta["verdict"] = "failed"
+    elif delta["pass_rate_vs_old"] > 0 or delta["tokens_vs_old_pct"] < 0:
+        delta["verdict"] = "improved"
     else:
-        if delta["pass_rate_vs_old"] > 0 or delta["tokens_vs_old_pct"] < 0:
-            verdict = "improved"
-        else:
-            verdict = "neutral"
+        delta["verdict"] = "neutral"
 
-    delta["verdict"] = verdict
     return delta
 
-def init_baseline(skill_path: str, baseline_file: str) -> Dict[str, Any]:
+
+def init_baseline(skill_path: str, baseline_file: str) -> dict[str, Any]:
     """Create initial baseline.json template."""
     baseline = {
         "without_skill": {
             "pass_rate": {"mean": 0.0},
             "time_seconds": {"mean": 0.0},
-            "tokens": {"mean": 0.0}
+            "tokens": {"mean": 0.0},
         },
         "with_skill": {
             "pass_rate": {"mean": 0.0},
             "time_seconds": {"mean": 0.0},
-            "tokens": {"mean": 0.0}
+            "tokens": {"mean": 0.0},
         },
         "metadata": {
             "skill_path": skill_path,
-            "created_at": "auto-init"
-        }
+            "created_at": "auto-init",
+        },
     }
     Path(baseline_file).parent.mkdir(parents=True, exist_ok=True)
-    with open(baseline_file, "w") as f:
-        json.dump(baseline, f, indent=2)
+    Path(baseline_file).write_text(json.dumps(baseline, indent=2), encoding="utf-8")
     return baseline
 
-def main():
+
+def main() -> int:
     parser = argparse.ArgumentParser(description="Skill Delta Calculator")
     parser.add_argument("--init", action="store_true", help="Initialize baseline template")
     parser.add_argument("--skill-path", help="Path to skill directory (required for --init)")
-    parser.add_argument("--compare", action="store_true", help="Compare new benchmark against baseline")
-    parser.add_argument("--new-result", help="Path to new benchmark.json (required for --compare)")
-    parser.add_argument("--baseline-file", default="baseline.json", help="Baseline file path")
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="Compare new benchmark against baseline",
+    )
+    parser.add_argument(
+        "--new-result",
+        help="Path to new benchmark.json (required for --compare)",
+    )
+    parser.add_argument(
+        "--baseline-file",
+        default="baseline.json",
+        help="Baseline file path",
+    )
     args = parser.parse_args()
 
     if args.init:
         if not args.skill_path:
-            print("Error: --skill-path required for --init", file=sys.stderr)
-            sys.exit(1)
+            print("--skill-path required for --init", file=sys.stderr)
+            return 1
         result = init_baseline(args.skill_path, args.baseline_file)
-        print(json.dumps({
-            "status": "baseline_initialized",
-            "file": args.baseline_file,
-            "template": result
-        }, indent=2))
+        print(json.dumps({"status": "baseline_initialized", "file": args.baseline_file, "template": result}, indent=2))
+        return 0
 
-    elif args.compare:
-        if not args.new_result:
-            print("Error: --new-result required for --compare", file=sys.stderr)
-            sys.exit(1)
-        if not Path(args.baseline_file).exists():
-            print(f"Error: baseline file not found: {args.baseline_file}", file=sys.stderr)
-            sys.exit(1)
-        with open(args.baseline_file) as f:
-            baseline = json.load(f)
-        with open(args.new_result) as f:
-            new_data = json.load(f)
+    if not args.compare:
+        parser.print_help(sys.stderr)
+        return 1
 
-        delta = compute_delta(
-            baseline["with_skill"],
-            baseline["without_skill"],
-            new_data.get("with_skill", {})
-        )
-        # Add metadata
-        delta["metadata"] = {
-            "baseline_file": args.baseline_file,
-            "new_result": args.new_result,
-            "timestamp": "now"
-        }
-        print(json.dumps(delta, indent=2))
+    if not args.new_result:
+        print("--new-result required for --compare", file=sys.stderr)
+        return 1
 
-    else:
-        parser.print_help()
-        sys.exit(1)
+    baseline_path = Path(args.baseline_file)
+    if not baseline_path.exists():
+        print(f"baseline file not found: {args.baseline_file}", file=sys.stderr)
+        return 1
+
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    new_data = json.loads(Path(args.new_result).read_text(encoding="utf-8"))
+
+    delta = compute_delta(
+        baseline_with=baseline["with_skill"],
+        new_with=new_data.get("with_skill", {}),
+        baseline_without=baseline["without_skill"],
+    )
+
+    delta["metadata"] = {
+        "baseline_file": args.baseline_file,
+        "new_result": args.new_result,
+        "timestamp": "now",
+    }
+
+    print(json.dumps(delta, indent=2))
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
