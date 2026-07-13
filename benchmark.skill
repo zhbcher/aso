@@ -1,0 +1,263 @@
+# evolution/benchmark.skill — Evolution Benchmark Layer
+# 职责: 基于真实 Trace 数据运行 Benchmark Suite，输出可对比评分
+# 类型: Skill (OpenClaw Plugin)
+# 评分范围: 0.0 - 100.0
+
+import json
+import os
+import math
+import sys
+import importlib.util
+from importlib.machinery import SourceFileLoader
+from typing import Optional, List, Dict
+
+# P2-H fix: Use shared time_utils instead of duplicating _utcnow_iso()
+_lib_dir = os.path.join(os.path.dirname(__file__), "_lib")
+if _lib_dir not in sys.path:
+    sys.path.insert(0, _lib_dir)
+
+from _lib.time_utils import utcnow_iso as _utcnow_iso
+
+
+def run_suite(target: str, traces=None, runs: int = 3) -> dict:
+    """
+    对指定 Target 运行 Benchmark Suite。
+
+    评分基于真实 Trace 数据的统计指标:
+    - 成功率 (40% 权重)
+    - 平均延迟效率 (25% 权重)
+    - Token 效率 (20% 权重)
+    - 稳定性 (15% 权重)
+
+    Args:
+        target: 要 benchmark 的 Target（planner, workflow, prompt 等）
+        traces: trace 数据列表。None 时从 observe 加载。
+        runs:   重复运行次数（用于计算稳定性），默认 3 次。
+
+    Returns:
+        dict: {target, score, runs, stability, details, tokens_used, cost}
+    """
+    if traces is None:
+        # 从 observe 加载
+        # P1-E fix: Use importlib instead of exec() for security isolation
+        sys.path.insert(0, os.path.dirname(__file__))
+        obs_path = os.path.join(os.path.dirname(__file__), "observe.skill")
+        if os.path.exists(obs_path):
+            spec = importlib.util.spec_from_file_location(
+                "observe_bench", obs_path,
+                loader=SourceFileLoader("observe_bench", obs_path)
+            )
+            obs_mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(obs_mod)
+            traces = obs_mod.observe(target=target, count=100)
+
+    if not traces:
+        traces = _default_traces(target)
+
+    # 运行多次以计算稳定性
+    all_scores = []
+    total_tokens = 0
+
+    for i in range(runs):
+        run_result = _compute_score(traces, target)
+        all_scores.append(run_result["score"])
+
+    avg_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
+    stability = _calc_stability(all_scores)
+
+    # 计算真实 token 使用量
+    total_tokens = sum(
+        t.get("total_tokens", 0) for t in traces
+    )
+
+    return {
+        "target": target,
+        "score": round(avg_score, 2),
+        "runs": runs,
+        "stability": round(stability, 4),
+        "details": {
+            "scores": [round(s, 2) for s in all_scores],
+            "min_score": round(min(all_scores), 2) if all_scores else 0.0,
+            "max_score": round(max(all_scores), 2) if all_scores else 0.0,
+            "test_count": len(traces),
+            "success_rate": round(_success_rate(traces), 4),
+            "avg_latency_ms": round(_avg_latency(traces), 2),
+            "avg_token_efficiency": round(_token_efficiency(traces), 2),
+            "trace_count": len(traces),
+        },
+        "tokens_used": total_tokens,
+        "cost": round(total_tokens * 0.000001, 6),  # ~$1/M tokens
+    }
+
+
+def compare(baseline: dict, candidate: dict) -> dict:
+    """
+    对比 Baseline 和 Candidate 的评分结果。
+
+    Args:
+        baseline:  run_suite 的基线结果
+        candidate: run_suite 的候选结果
+
+    Returns:
+        dict: {baseline, candidate, delta, verdict}
+    """
+    bs = baseline.get("score", 0.0)
+    cs = candidate.get("score", 0.0)
+    delta = round(cs - bs, 2)
+
+    if delta > 2.0:
+        verdict = "improved"
+        description = f"显著改善: +{delta} 分"
+    elif delta > 0.5:
+        verdict = "slightly_improved"
+        description = f"轻微改善: +{delta} 分"
+    elif delta > -0.5:
+        verdict = "unchanged"
+        description = f"基本不变: {delta} 分"
+    elif delta > -2.0:
+        verdict = "slightly_degraded"
+        description = f"轻微退化: {delta} 分"
+    else:
+        verdict = "degraded"
+        description = f"显著退化: {delta} 分"
+
+    # 稳定性对比
+    baseline_stability = baseline.get("stability", 0.9)
+    candidate_stability = candidate.get("stability", 0.9)
+
+    return {
+        "baseline": {
+            "score": round(bs, 2),
+            "stability": round(baseline_stability, 4),
+            "runs": baseline.get("runs", 1),
+        },
+        "candidate": {
+            "score": round(cs, 2),
+            "stability": round(candidate_stability, 4),
+            "runs": candidate.get("runs", 1),
+        },
+        "delta": delta,
+        "verdict": verdict,
+        "description": description,
+    }
+
+
+def _compute_score(traces: list[dict], target: str) -> dict:
+    """
+    基于真实 trace 数据计算综合评分。
+
+    评分维度:
+    1. 成功率 — 目标组件任务的成功比例 (40%)
+    2. 延迟效率 — 延迟越低的效率分越高 (25%)
+    3. Token 效率 — 每 token 产出效率 (20%)
+    4. 稳定性 — 评分在多次采样中的波动 (15%)
+    """
+    if not traces:
+        return {"score": 50.0}
+
+    # 1. 成功率 (0-100, 权重 40%)
+    success_rate = _success_rate(traces)
+    score_success = success_rate * 100  # 0.85 → 85
+
+    # 2. 延迟效率 (0-100, 权重 25%)
+    avg_latency = _avg_latency(traces)
+    # 延迟 50ms → 95分, 500ms → 50分, 1000ms → 20分
+    score_latency = max(0, 100 - (avg_latency / 10))
+    score_latency = min(100, score_latency)
+    # 加上 token 效率 (每 ms 处理的 token 数)
+    token_eff = _token_efficiency(traces)
+    score_token_eff = min(100, token_eff * 50)
+
+    # 3. 综合评分 (加权)
+    score = (
+        score_success * 0.40 +
+        score_latency * 0.25 +
+        score_token_eff * 0.20 +
+        70 * 0.15  # 稳定性基准分
+    )
+
+    # 防 Reward Hacking：多维度约束惩罚
+    # 如果延迟很低但成功率也低（作弊行为），扣分
+    if score_latency > 80 and score_success < 60:
+        score *= 0.7  # 可疑的"低延迟高失败"模式，降权
+    # 如果 token 效率异常高但延迟极低，可能是作弊
+    if score_token_eff > 90 and score_latency < 30:
+        score *= 0.8  # 异常组合，降低信任度
+
+    return {
+        "score": round(score, 2),
+        "success_rate": round(success_rate, 4),
+        "avg_latency": round(avg_latency, 2),
+        "token_efficiency": round(token_eff, 4),
+    }
+
+
+def _success_rate(traces: list[dict]) -> float:
+    """从 trace 数据计算任务成功率
+    
+    P1 fix: Synced with diagnose.skill logic — check trace-level success
+    field first, then fall back to planner.success.
+    """
+    if not traces:
+        return 0.0
+
+    successes = sum(
+        1 for t in traces
+        if t.get("success", t.get("planner", {}).get("success", False))
+    )
+    return successes / len(traces)
+
+
+def _avg_latency(traces: list[dict]) -> float:
+    """从 trace 数据计算平均延迟 (ms)"""
+    if not traces:
+        return 0.0
+
+    latencies = [
+        t.get("planner", {}).get("latency_ms", 0)
+        for t in traces
+        if isinstance(t.get("planner"), dict)
+    ]
+    if not latencies:
+        return 0.0
+    return sum(latencies) / len(latencies)
+
+
+def _token_efficiency(traces: list[dict]) -> float:
+    """计算每毫秒处理的 token 数（越高越好）"""
+    if not traces:
+        return 0.0
+
+    total_tokens = sum(t.get("total_tokens", 0) for t in traces)
+    total_duration = sum(t.get("total_duration_ms", 1) for t in traces)
+
+    if total_duration == 0:
+        return 0.0
+    return total_tokens / total_duration
+
+
+def _calc_stability(scores: list[float]) -> float:
+    """
+    计算评分稳定性（1.0 - 归一化标准差）。
+    越接近 1.0 表示越稳定。
+    """
+    if len(scores) < 2:
+        return 1.0
+
+    avg = sum(scores) / len(scores)
+    variance = sum((s - avg) ** 2 for s in scores) / len(scores)
+    std_dev = math.sqrt(variance)
+
+    # 归一化到 0-1（假设评分范围 0-100）
+    normalized_std = std_dev / 100.0
+    stability = max(0.0, 1.0 - normalized_std)
+
+    return stability
+
+
+def _default_traces(target: str) -> list[dict]:
+    """
+    P1 fix: No longer generate synthetic data. Return empty list instead.
+    This is consistent with the P2 fix that removed synthetic fallback from orchestrate.
+    """
+    return []

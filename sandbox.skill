@@ -1,0 +1,540 @@
+# evolution/sandbox.skill — Evolution Sandbox Layer
+# 职责: 隔离评估 Candidate，在临时目录中真正应用变更并对比结果
+# 类型: Skill (OpenClaw Plugin)
+# 必须: State Snapshot + 临时副本变更 + Budget Control + Rollback
+
+import copy
+import time
+import os
+import json
+import shutil
+import tempfile
+import types as _bt
+import importlib.util
+import sys
+from typing import Optional
+
+# Add _lib to import path for path validation
+_lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_lib")
+if _lib_dir not in sys.path:
+    sys.path.insert(0, _lib_dir)
+
+from _lib.path_utils import EVOLVE_DIR
+
+from importlib.machinery import SourceFileLoader as _ExtensionFileLoader
+
+
+DEFAULT_BUDGET = {
+    "max_tokens": 50000,
+    "max_time_sec": 300,
+    "max_cost": 5.0,
+    "max_retries": 3,
+    "max_generations": 5,
+}
+
+
+def sandbox(
+    target: str,
+    candidate: dict,
+    budget: Optional[dict] = None,
+    workspace_path: Optional[str] = None,
+) -> dict:
+    """
+    隔离评估 Candidate。
+
+    流程:
+    1. Snapshot 当前工作区
+    2. 创建临时副本
+    3. 在副本上应用 Candidate 变更
+    4. 运行 Benchmark（基线 vs 候选）
+    5. 评分对比
+    6. 回滚到原始状态
+
+    Args:
+        target:        演化目标（planner, workflow, prompt 等）
+        candidate:     generator 输出的候选方案
+        budget:        预算控制参数
+        workspace_path: 工作区路径（用于 Snapshot）
+
+    Returns:
+        dict: {baseline_score, candidate_score, delta, reliability,
+               budget_used, error}
+    """
+    if budget is None:
+        budget = copy.deepcopy(DEFAULT_BUDGET)
+
+    budget_start = time.time()
+    budget_tokens_used = 0
+    budget_cost = 0.0
+    error = None
+    temp_dir = None
+    rollback_needed = False
+
+    try:
+        # Step 1: Snapshot 当前状态
+        workspace = str(workspace_path) if workspace_path else str(EVOLVE_DIR)
+        snap = _snapshot(workspace)
+        if not snap["success"]:
+            return _error_result("Snapshot 失败: " + snap.get("error", "未知错误"), budget)
+
+        # Step 2: 创建隔离的临时副本
+        temp_dir = tempfile.mkdtemp(prefix="evolution_sandbox_")
+
+        # 复制 evolution 目录到临时目录（排除大文件和缓存）
+        for item in os.listdir(workspace):
+            if item.startswith("__") or item == "__pycache__":
+                continue
+            src = os.path.join(workspace, item)
+            dst = os.path.join(temp_dir, item)
+            if os.path.isfile(src):
+                shutil.copy2(src, dst)
+            elif os.path.isdir(src):
+                shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__"))
+
+        rollback_needed = True
+
+        # Step 3: 检查 Budget（时间）
+        elapsed = time.time() - budget_start
+        _check_budget_time(elapsed, budget)
+
+        # Step 4: 获取 Baseline 评分（在原始工作区运行）
+        bench_mod = _load_benchmark()
+        if bench_mod is None:
+            return _error_result("benchmark.skill 加载失败", budget, elapsed)
+
+        baseline = bench_mod.run_suite(target)
+        budget_tokens_used += baseline.get("tokens_used", 0)
+        budget_cost = baseline.get("cost", 0.0)
+        _check_budget_tokens(budget_tokens_used, budget)
+        _check_budget_cost(budget_cost, budget)
+
+        # Step 5: 在临时副本上应用 Candidate
+        app_result = _apply_candidate(candidate, target, temp_dir)
+        if not app_result["success"]:
+            return _error_result(
+                "应用 Candidate 失败: " + app_result.get("error", ""),
+                budget, elapsed, baseline
+            )
+
+        # Step 6: 在隔离副本上运行 Candidate Benchmark
+        # 切换 sys.path 到临时目录
+        old_path = list(__import__("sys").path)
+        try:
+            __import__("sys").path.insert(0, temp_dir)
+            candidate_mod = _load_benchmark_from(temp_dir)
+            if candidate_mod:
+                candidate_result = candidate_mod.run_suite(target)
+            else:
+                candidate_result = bench_mod.run_suite(target)
+        finally:
+            __import__("sys").path = old_path
+
+        budget_tokens_used += candidate_result.get("tokens_used", 0)
+        budget_cost += candidate_result.get("cost", 0.0)
+        _check_budget_cost(budget_cost, budget)
+
+        # Step 7: 对比
+        comparison = bench_mod.compare(baseline, candidate_result)
+
+        # Step 8: 回滚到原始状态
+        _rollback(snap)
+        rollback_needed = False
+
+        budget_elapsed = time.time() - budget_start
+
+        result = {
+            "baseline_score": baseline.get("score", 0.0),
+            "candidate_score": candidate_result.get("score", 0.0),
+            "delta": comparison.get("delta", 0.0),
+            "verdict": comparison.get("verdict", "unknown"),
+            "reliability": candidate_result.get("stability", 0.0),
+            "runs": candidate_result.get("runs", 1),
+            "budget_used": {
+                "tokens": budget_tokens_used,
+                "time_sec": round(budget_elapsed, 2),
+                "cost": round(budget_cost, 4),
+            },
+            "details": {
+                "baseline": baseline.get("details", {}),
+                "candidate": candidate_result.get("details", {}),
+            },
+        }
+
+        return result
+
+    except SandboxBudgetError as e:
+        error = str(e)
+        return _error_result(error, budget, time.time() - budget_start)
+    except Exception as e:
+        error = str(e)
+        return _error_result(error, budget, time.time() - budget_start)
+    finally:
+        # 确保回滚和清理临时目录
+        if rollback_needed:
+            try:
+                _rollback(snap)
+            except Exception:
+                pass
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+
+class SandboxBudgetError(Exception):
+    """预算超限错误"""
+    pass
+
+
+def _check_budget_time(elapsed: float, budget: dict):
+    """检查时间预算"""
+    max_time = budget.get("max_time_sec", 300)
+    if elapsed > max_time:
+        raise SandboxBudgetError(f"Budget 超时: {round(elapsed, 1)}s > {max_time}s")
+
+
+def _check_budget_tokens(used: int, budget: dict):
+    """检查 Token 预算"""
+    max_tokens = budget.get("max_tokens", 50000)
+    if used > max_tokens:
+        raise SandboxBudgetError(f"Budget 超限: {used} tokens > {max_tokens}")
+
+
+def _check_budget_cost(cost: float, budget: dict):
+    """检查费用预算"""
+    max_cost = budget.get("max_cost", 5.0)
+    if cost > max_cost:
+        raise SandboxBudgetError(f"Budget 超限: ${round(cost, 2)} > ${max_cost}")
+
+
+def _snapshot(workspace_path: str) -> dict:
+    """
+    对工作区做状态快照。
+    复制所有 .skill/.py/.json/.yaml 文件到临时快照目录，用于回滚。
+    """
+    try:
+        snap_dir = tempfile.mkdtemp(prefix="evolution_snapshot_")
+        backed_up = []
+
+        # Snapshot all code files in the workspace
+        snapshot_extensions = {".skill", ".py", ".json", ".yaml", ".md"}
+        for item in os.listdir(workspace_path):
+            src = os.path.join(workspace_path, item)
+            if os.path.isfile(src):
+                ext = os.path.splitext(item)[1]
+                if ext in snapshot_extensions:
+                    dst = os.path.join(snap_dir, item)
+                    shutil.copy2(src, dst)
+                    backed_up.append(item)
+            elif os.path.isdir(src):
+                # Recursively copy subdirectories (generator/, _lib/, state/)
+                sub_snap = os.path.join(snap_dir, item)
+                os.makedirs(sub_snap, exist_ok=True)
+                for root, dirs, files in os.walk(src):
+                    # Skip __pycache__, _backups
+                    dirs[:] = [d for d in dirs if d not in ("__pycache__", "_backups")]
+                    for fname in files:
+                        fext = os.path.splitext(fname)[1]
+                        if fext in snapshot_extensions:
+                            rel_path = os.path.relpath(root, src)
+                            dst_dir = os.path.join(sub_snap, rel_path) if rel_path != "." else sub_snap
+                            os.makedirs(dst_dir, exist_ok=True)
+                            shutil.copy2(os.path.join(root, fname), os.path.join(dst_dir, fname))
+                            backed_up.append(os.path.join(item, rel_path, fname) if rel_path != "." else os.path.join(item, fname))
+
+        return {
+            "success": True,
+            "snap_dir": snap_dir,
+            "workspace": workspace_path,
+            "backed_up_files": backed_up,
+            "timestamp": time.time(),
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def _apply_candidate(candidate: dict, target: str, work_dir: str) -> dict:
+    """
+    在临时目录中真正应用 Candidate 变更。
+
+    变更类型支持:
+    - integrate_mechanism: 写机制描述文件到 target 目录
+    - modify_search_loop: 修改 target 组件的搜索循环参数
+    - modify_skill_file: 修改实际技能文件（replace/append）
+    - add_step: 添加步骤
+    - reduce: 减少参数
+    """
+    changes = candidate.get("changes", [])
+    applied = []
+
+    for change in changes:
+        action = change.get("action", "")
+
+        if action == "integrate_mechanism":
+            mechanism = change.get("mechanism", "unknown")
+            target_module = change.get("target_module", target)
+
+            # 创建机制描述文件
+            mech_dir = os.path.join(work_dir, "mechanisms")
+            os.makedirs(mech_dir, exist_ok=True)
+            mech_file = os.path.join(mech_dir, f"{mechanism}.json")
+            mech_data = {
+                "name": mechanism,
+                "target": target_module,
+                "description": change.get("description", ""),
+                "interface": change.get("interface", {}),
+                "integration": change.get("integration", {}),
+                "applied_at": time.time(),
+            }
+            with open(mech_file, "w") as f:
+                json.dump(mech_data, f, indent=2)
+
+            applied.append({
+                "action": "integrate_mechanism",
+                "file": mech_file,
+                "details": f"Created {mechanism} mechanism file for {target_module}"
+            })
+
+        elif action == "modify_skill_file":
+            # P0 fix: Actually modify skill files in the sandbox copy
+            skill_name = change.get("skill_name", target)
+            file_path_relative = change.get("file_path", "")
+            new_content = change.get("new_content", "")
+            operation = change.get("operation", "replace")  # replace | append
+
+            if not file_path_relative or not new_content:
+                applied.append({
+                    "action": "modify_skill_file",
+                    "details": f"skipped: missing file_path or new_content for {skill_name}"
+                })
+                continue
+
+            # P0-A fix: Validate path to prevent traversal attacks
+            normalized = os.path.normpath(file_path_relative)
+            if os.path.isabs(normalized) or normalized.startswith(".."):
+                applied.append({
+                    "action": "modify_skill_file",
+                    "details": f"skipped: path traversal blocked: {file_path_relative}"
+                })
+                continue
+
+            # Resolve target file: try within work_dir first (evolve's own files)
+            # Then try skills directory
+            target_file = os.path.join(work_dir, normalized)
+            if not os.path.exists(target_file):
+                # Try relative to skills dir
+                skills_base = os.path.join(os.path.dirname(work_dir), skill_name, file_path_relative)
+                if os.path.exists(skills_base):
+                    # Copy it into work_dir for sandbox evaluation
+                    sandbox_target = os.path.join(work_dir, skill_name, file_path_relative)
+                    os.makedirs(os.path.dirname(sandbox_target), exist_ok=True)
+                    shutil.copy2(skills_base, sandbox_target)
+                    target_file = sandbox_target
+                else:
+                    # Create new file in sandbox
+                    target_file = os.path.join(work_dir, skill_name, file_path_relative)
+                    os.makedirs(os.path.dirname(target_file), exist_ok=True)
+
+            if operation == "append" and os.path.exists(target_file):
+                with open(target_file, "r", encoding="utf-8") as f:
+                    old_content = f.read()
+                new_content = old_content + "\n" + new_content
+
+            with open(target_file, "w", encoding="utf-8") as f:
+                f.write(new_content)
+
+            applied.append({
+                "action": "modify_skill_file",
+                "file": target_file,
+                "details": f"Modified {file_path_relative} in {skill_name} ({operation})"
+            })
+
+        elif action == "modify_search_loop":
+            param = change.get("parameter", "")
+            from_val = change.get("from", "")
+            to_val = change.get("to", "")
+
+            # 写变更配置文件
+            config_dir = os.path.join(work_dir, "config")
+            os.makedirs(config_dir, exist_ok=True)
+            config_file = os.path.join(config_dir, "search_params.json")
+
+            params = {}
+            if os.path.exists(config_file):
+                with open(config_file) as f:
+                    params = json.load(f)
+
+            params[param] = {
+                "from": from_val,
+                "to": to_val,
+                "applied_at": time.time(),
+            }
+
+            with open(config_file, "w") as f:
+                json.dump(params, f, indent=2)
+
+            applied.append({
+                "action": "modify_search_loop",
+                "file": config_file,
+                "details": f"Changed {param}: {from_val} -> {to_val}"
+            })
+
+        elif action == "add_step":
+            step = change.get("step", "unknown")
+            position = change.get("position", "end")
+
+            config_dir = os.path.join(work_dir, "config")
+            os.makedirs(config_dir, exist_ok=True)
+            steps_file = os.path.join(config_dir, "pipeline_steps.json")
+
+            steps = []
+            if os.path.exists(steps_file):
+                with open(steps_file) as f:
+                    steps = json.load(f)
+
+            if position == "after_plan":
+                steps.insert(1, step)
+            else:
+                steps.append(step)
+
+            with open(steps_file, "w") as f:
+                json.dump(steps, f, indent=2)
+
+            applied.append({
+                "action": "add_step",
+                "details": f"Added step '{step}' at position '{position}'"
+            })
+
+        elif action == "reduce":
+            parameter = change.get("parameter", "")
+            from_val = change.get("from", "")
+            to_val = change.get("to", "")
+
+            config_dir = os.path.join(work_dir, "config")
+            os.makedirs(config_dir, exist_ok=True)
+            config_file = os.path.join(config_dir, "params.json")
+
+            params = {}
+            if os.path.exists(config_file):
+                with open(config_file) as f:
+                    params = json.load(f)
+
+            params[parameter] = {
+                "from": from_val,
+                "to": to_val,
+                "applied_at": time.time(),
+            }
+
+            with open(config_file, "w") as f:
+                json.dump(params, f, indent=2)
+
+            applied.append({
+                "action": "reduce",
+                "details": f"Reduced {parameter}: {from_val} -> {to_val}"
+            })
+
+    return {"success": True, "applied": applied}
+
+
+def _rollback(snap: dict) -> dict:
+    """
+    从 Snapshot 回滚到原始状态。
+    恢复快照目录中的所有文件到工作区。
+    """
+    try:
+        snap_dir = snap.get("snap_dir")
+        workspace = snap.get("workspace")
+
+        if not snap_dir or not os.path.exists(snap_dir):
+            return {"success": False, "error": "Snapshot 不存在"}
+
+        restored = []
+        # Restore all backed-up files from snapshot
+        for root, dirs, files in os.walk(snap_dir):
+            for fname in files:
+                src_file = os.path.join(root, fname)
+                rel_path = os.path.relpath(src_file, snap_dir)
+                dst_file = os.path.join(workspace, rel_path)
+                os.makedirs(os.path.dirname(dst_file), exist_ok=True)
+                shutil.copy2(src_file, dst_file)
+                restored.append(rel_path)
+
+        # Clean up snapshot directory
+        shutil.rmtree(snap_dir, ignore_errors=True)
+
+        return {"success": True, "restored_files": restored}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def _load_benchmark():
+    """加载 benchmark 模块
+
+    P1-E fix: Use importlib.util.spec_from_file_location instead of exec()
+    for security isolation. This prevents the loaded module from accessing
+    and tampering with the caller's globals.
+    """
+    bench_path = os.path.join(str(EVOLVE_DIR), "benchmark.skill")
+    if not os.path.exists(bench_path):
+        return None
+    try:
+        mod_name = "benchmark_baseline"
+        spec = importlib.util.spec_from_file_location(
+            mod_name, bench_path,
+            loader=_ExtensionFileLoader(mod_name, bench_path)
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+def _load_benchmark_from(work_dir: str):
+    """从指定目录加载 benchmark 模块
+
+    P1-C fix: Use unique module name with timestamp to avoid Python module
+    cache contamination between baseline and candidate benchmark runs.
+    P1-E fix: Use importlib.util.spec_from_file_location instead of exec()
+    for security isolation.
+    """
+    bench_path = os.path.join(work_dir, "benchmark.skill")
+    if not os.path.exists(bench_path):
+        return None
+    try:
+        # Use unique module name to avoid sys.modules cache hits
+        mod_name = f"benchmark_candidate_{int(time.time() * 1000)}"
+        spec = importlib.util.spec_from_file_location(
+            mod_name, bench_path,
+            loader=_ExtensionFileLoader(mod_name, bench_path)
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+def _error_result(
+    error: str,
+    budget: dict,
+    elapsed: float = 0.0,
+    baseline: Optional[dict] = None,
+) -> dict:
+    """生成错误结果"""
+    result = {
+        "baseline_score": baseline.get("score", 0.0) if baseline else 0.0,
+        "candidate_score": 0.0,
+        "delta": 0.0,
+        "verdict": "error",
+        "reliability": 0.0,
+        "runs": 0,
+        "budget_used": {
+            "tokens": 0,
+            "time_sec": round(elapsed, 2),
+            "cost": 0.0,
+        },
+        "error": error,
+    }
+    return result

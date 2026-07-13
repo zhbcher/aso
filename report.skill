@@ -1,0 +1,151 @@
+# evolution/report.skill — Evolution Report Layer
+# 职责: 将演化全过程打包成标准化 Evolution Proposal
+# 类型: Skill (OpenClaw Plugin)
+# 不修改任何系统状态，只输出文档
+
+import json
+import os
+import sys
+
+# P2-H fix: Use shared time_utils instead of duplicating _utcnow_iso()
+_lib_dir = os.path.join(os.path.dirname(__file__), "_lib")
+if _lib_dir not in sys.path:
+    sys.path.insert(0, _lib_dir)
+
+from _lib.time_utils import utcnow_iso as _utcnow_iso
+
+
+def build_proposal(
+    target: str,
+    strategy: str,
+    traces: list[dict],
+    report: dict,
+    candidate: dict,
+    sandbox_result: dict,
+) -> dict:
+    """
+    将整个演化过程打包为标准化 Evolution Proposal。
+
+    Args:
+        target:        演化目标
+        strategy:      使用的生成策略
+        traces:        observe 输出的 Trace 列表
+        report:        diagnose 输出的 BottleneckReport
+        candidate:     generator 输出的候选方案
+        sandbox_result: sandbox 评估结果
+
+    Returns:
+        dict: 标准化的 Evolution Proposal，可直接输出为 YAML。
+              验证字段完整性后返回，异常时返回错误 dict。
+    """
+    # 提取时间范围
+    timestamps = [
+        t.get("timestamp") for t in traces
+        if t.get("timestamp")
+    ]
+    obs_start = min(timestamps) if timestamps else "unknown"
+    obs_end = max(timestamps) if timestamps else "unknown"
+
+    # 构建 Proposal
+    proposal = {
+        "proposal_version": "v1",
+        "timestamp": _utcnow_iso(),
+        "target": target,
+        "strategy": strategy,
+        "generator": candidate.get("generator", strategy),
+        "observation_range": {
+            "start": obs_start,
+            "end": obs_end,
+            "tasks_count": len(traces),
+        },
+        "diagnosis": {
+            "tool_efficiency": report.get("tool_efficiency", {}),
+            "task_quality": report.get("task_quality", {}),
+            "skill_success": report.get("skill_success", {}),
+            "context_utilization": report.get("context_utilization", {}),
+            "skills": report.get("skills", {}),
+            "priority": report.get("priority", []),
+            "trace_count": report.get("trace_count", len(traces)),
+            "analysis_confidence": report.get("analysis_confidence", 0.0),
+            "data_source": report.get("data_source", "unknown"),
+        },
+        "candidate": {
+            "type": candidate.get("type", "config"),
+            "strategy": candidate.get("strategy", "bilevel"),
+            "mechanism": candidate.get("mechanism", ""),
+            "description": candidate.get("description", ""),
+            "changes": candidate.get("changes", []),
+            "risk": candidate.get("risk", "medium"),
+            "expected_improvement": candidate.get("expected_improvement", ""),
+        },
+        "benchmark": {
+            "baseline_score": sandbox_result.get("baseline_score", 0.0),
+            "candidate_score": sandbox_result.get("candidate_score", 0.0),
+            "delta": sandbox_result.get("delta", 0.0),
+            "verdict": sandbox_result.get("verdict", "unknown"),
+            "reliability": sandbox_result.get("reliability", 0.0),
+            "runs": sandbox_result.get("runs", 1),
+            "budget_used": sandbox_result.get("budget_used", {}),
+        },
+        "status": "proposed",
+    }
+
+    # 验证
+    errors = _validate(proposal)
+    if errors:
+        proposal["validation_errors"] = errors
+        proposal["valid"] = False
+    else:
+        proposal["valid"] = True
+
+    return proposal
+
+
+def proposal_to_yaml(proposal: dict) -> str:
+    """
+    将 Proposal dict 序列化为 YAML 格式字符串。
+    如果没有 yaml 库，fallback 到 JSON。
+    """
+    try:
+        import yaml
+        return yaml.dump(proposal, default_flow_style=False, sort_keys=False)
+    except ImportError:
+        return json.dumps(proposal, indent=2, default=str)
+
+
+def proposal_to_json(proposal: dict) -> str:
+    """将 Proposal dict 序列化为 JSON 字符串"""
+    return json.dumps(proposal, indent=2, default=str)
+
+
+def _validate(proposal: dict) -> list[str]:
+    """校验 Proposal 字段完整性"""
+    errors = []
+
+    required_fields = [
+        "proposal_version", "timestamp", "target", "strategy",
+        "observation_range", "diagnosis", "candidate", "benchmark", "status",
+    ]
+
+    for field in required_fields:
+        if field not in proposal:
+            errors.append(f"缺少必填字段: {field}")
+
+    # 检查子字段
+    obs = proposal.get("observation_range", {})
+    if "tasks_count" not in obs:
+        errors.append("observation_range 缺少 tasks_count")
+
+    bench = proposal.get("benchmark", {})
+    if "baseline_score" not in bench or "candidate_score" not in bench:
+        errors.append("benchmark 缺少评分字段")
+
+    cand = proposal.get("candidate", {})
+    if "changes" not in cand or not isinstance(cand.get("changes"), list):
+        errors.append("candidate 缺少 changes 列表")
+
+    diag = proposal.get("diagnosis", {})
+    if "priority" not in diag:
+        errors.append("diagnosis 缺少 priority 列表")
+
+    return errors

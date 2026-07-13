@@ -1,0 +1,112 @@
+"""observe.skill — OpenClaw 版 Evolution Observation Layer
+职责: 只读观测 OpenClaw 会话数据，提取工具调用模式和失败率
+输入: target name, count
+输出: 符合 trace_schema v1 的结构化 Trace 列表
+约束: 只读，不修改任何系统状态
+"""
+
+import json
+import os
+import sys
+from typing import Optional, List, Dict
+
+_lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_lib")
+if _lib_dir not in sys.path:
+    sys.path.insert(0, _lib_dir)
+
+from path_utils import EVOLVE_DIR, STATE_DIR, TRACE_STORE_FILE
+from oc_session_reader import load_recent_traces
+from lock_utils import file_lock
+
+
+def observe(target: Optional[str] = None, count: int = 100) -> List[Dict]:
+    """
+    从 OpenClaw 会话记录读取最近 N 条任务 Trace。
+
+    数据源优先级:
+    1. 本地 trace_store.json 持久化文件
+    2. OpenClaw 会话文件（通过 oc_session_reader）
+    3. 空列表（不生成合成数据）
+
+    Args:
+        target: 筛选特定 Target（保留接口兼容）。
+        count:  返回的最大 Trace 条数。
+
+    Returns:
+        符合 trace_schema v1 的 Trace 列表。
+    """
+    # 方案 A: 从本地 trace_store.json 读取
+    traces = _read_trace_store(target, count)
+    if traces:
+        return traces[-count:]
+
+    # 方案 B: 从 OpenClaw 会话文件解析
+    sessions = load_recent_traces(limit=20)
+    if sessions:
+        if target:
+            sessions = [t for t in sessions if _trace_matches_target(t, target)]
+        if sessions:
+            return sessions[-count:]
+
+    # 方案 C: 无数据时返回空列表
+    return []
+
+
+def _trace_matches_target(trace: Dict, target: str) -> bool:
+    """检查 trace 是否与目标匹配。"""
+    return (
+        trace.get("agent", {}).get("id") == target
+        or trace.get("task_id", "").startswith(target)
+        or target in trace.get("source", "")
+    )
+
+
+def _read_trace_store(target: Optional[str], count: int) -> List[Dict]:
+    """从本地持久化 trace 文件读取"""
+    if not TRACE_STORE_FILE.exists():
+        return []
+
+    try:
+        with open(TRACE_STORE_FILE, "r", encoding="utf-8") as f:
+            stored = json.load(f)
+        if not isinstance(stored, list):
+            return []
+
+        if target:
+            return [t for t in stored if _trace_matches_target(t, target)]
+        return stored
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def store_trace(trace: Dict) -> bool:
+    """
+    将一条 Trace 持久化到本地存储（供 observe 回读用）。
+
+    Args:
+        trace: 符合 trace_schema v1 的标准化 Trace。
+
+    Returns:
+        bool: 是否成功存储。
+    """
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = str(TRACE_STORE_FILE) + ".lock"
+
+    try:
+        with file_lock(lock_path, timeout=10):
+            stored = []
+            if TRACE_STORE_FILE.exists():
+                with open(TRACE_STORE_FILE, "r", encoding="utf-8") as f:
+                    stored = json.load(f)
+            stored.append(trace)
+            # 最多保留 10000 条
+            if len(stored) > 10000:
+                stored = stored[-10000:]
+            # 原子写入
+            tmp_path = str(TRACE_STORE_FILE) + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(stored, f, indent=2, default=str, ensure_ascii=False)
+            os.replace(tmp_path, str(TRACE_STORE_FILE))
+        return True
+    except (IOError, json.JSONDecodeError, TimeoutError):
+        return False

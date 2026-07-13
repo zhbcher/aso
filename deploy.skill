@@ -1,0 +1,459 @@
+# deploy.skill -- Evolution Deploy Layer for OpenClaw
+# 职责: 将 Proposal 通过文件原子写入部署到 OpenClaw skills 目录
+# 核心设计: 备份旧文件 → 原子写入新文件 → 标记热加载 → 等待验证
+
+import json
+import os
+import sys
+import shutil
+import uuid
+import time
+from typing import Optional, List, Dict
+from pathlib import Path
+
+# Add _lib to import path
+_lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_lib")
+if _lib_dir not in sys.path:
+    sys.path.insert(0, _lib_dir)
+
+from path_utils import (
+    EVOLVE_DIR, STATE_DIR, BACKUPS_DIR, SKILLS_DIR,
+    MANIFESTS_FILE, RELOAD_TRIGGER,
+)
+from lock_utils import file_lock
+from time_utils import utcnow_iso
+from manifest_utils import (
+    load_manifest,
+    load_all_manifests,
+    store_manifest,
+    update_manifest_status,
+)
+
+
+def _validate_file_path(file_path_relative: str, skill_name: str) -> Optional[str]:
+    """Validate that file_path_relative does not escape the skill directory.
+
+    P0 fix: Prevent path traversal attacks (e.g. ../../etc/passwd).
+
+    Args:
+        file_path_relative: The relative file path from the change.
+        skill_name: The skill name (used for error messages).
+
+    Returns:
+        The normalized safe path if valid, None if path traversal detected.
+    """
+    if not file_path_relative:
+        return None
+    # Normalize and check for path traversal
+    normalized = os.path.normpath(file_path_relative)
+    # Reject absolute paths and paths that escape upward
+    if os.path.isabs(normalized) or normalized.startswith(".."):
+        return None
+    # Double-check: the resolved path must be within the skill directory
+    skill_base = SKILLS_DIR / skill_name
+    resolved = (skill_base / normalized).resolve()
+    try:
+        resolved.relative_to(skill_base.resolve())
+    except ValueError:
+        return None
+    return normalized
+
+
+def deploy(proposal: dict) -> Dict:
+    """
+    将 Proposal 部署到 OpenClaw 系统。
+
+    流程:
+    1. 验证 Proposal 格式
+    2. 输出 Proposal 文件到 state/proposals/ (Human Review 检查点)
+    3. 生成 manifest_id
+    4. 备份目标文件到 _backups/
+    5. 原子写入新文件到 skills 目录
+    6. 写入 .reload_trigger 标记文件
+    7. 记录 Manifest
+
+    Args:
+        proposal: report.skill 输出的 Evolution Proposal dict
+
+    Returns:
+        dict: {success, version, manifest_id, human_review_path, error}
+    """
+    # Step 1: 验证 Proposal
+    errors = _validate_proposal(proposal)
+    if errors:
+        return {
+            "success": False,
+            "version": None,
+            "manifest_id": None,
+            "human_review_path": None,
+            "error": f"Proposal 验证失败: {'; '.join(errors)}",
+        }
+
+    manifest_id = str(uuid.uuid4())
+    target = proposal.get("target", "unknown")
+    candidate = proposal.get("candidate", {})
+    changes = candidate.get("changes", [])
+    version = _next_version(target)
+
+    # Step 2: 输出 Proposal 到 state/proposals/ 目录
+    proposals_dir = STATE_DIR / "proposals"
+    proposals_dir.mkdir(parents=True, exist_ok=True)
+    proposal_filename = f"proposal-{target}-{version}-{manifest_id[:8]}.json"
+    proposal_path = proposals_dir / proposal_filename
+
+    proposal_doc = {
+        "manifest_id": manifest_id,
+        "status": "pending_review",
+        "proposal": proposal,
+        "output_at": utcnow_iso(),
+    }
+
+    with open(proposal_path, "w", encoding="utf-8") as f:
+        json.dump(proposal_doc, f, indent=2, default=str, ensure_ascii=False)
+
+    # Step 3: 构建 Manifest
+    manifest = {
+        "manifest_id": manifest_id,
+        "timestamp": utcnow_iso(),
+        "proposal_version": proposal.get("proposal_version", "v1"),
+        "target": target,
+        "strategy": proposal.get("strategy", "bilevel"),
+        "version": version,
+        "changes": changes,
+        "benchmark": proposal.get("benchmark", {}),
+        "status": "pending_review",
+        # P1-E fix: Track backup file mappings for reliable rollback
+        "backup_files": [],
+    }
+
+    store_manifest(manifest_id, manifest)
+
+    return {
+        "success": True,
+        "version": version,
+        "manifest_id": manifest_id,
+        "human_review_path": str(proposal_path),
+        "status": "pending_review",
+        "message": f"Proposal 已输出到 {proposal_path}，等待人工确认后执行部署",
+    }
+
+
+def confirm_deploy(manifest_id: str) -> Dict:
+    """
+    确认并执行部署（Human Review 后调用）。
+
+    执行实际文件写入操作：备份 → 原子写入 → 标记热加载。
+    P1-D fix: Uses file_lock to prevent concurrent deployment corruption.
+
+    Args:
+        manifest_id: 部署时生成的 manifest_id
+
+    Returns:
+        dict: {success, version, error}
+    """
+    manifest = load_manifest(manifest_id)
+    if not manifest:
+        return {"success": False, "error": f"Manifest {manifest_id} 不存在"}
+
+    if manifest.get("status") != "pending_review":
+        return {
+            "success": False,
+            "error": f"Manifest 状态为 {manifest.get('status')}，不是 pending_review",
+        }
+
+    target = manifest.get("target", "unknown")
+    changes = manifest.get("changes", [])
+    version = manifest.get("version", "unknown")
+
+    # P1-D fix: Use file lock to prevent concurrent deploy operations
+    deploy_lock_path = str(STATE_DIR / "deploy.lock")
+    try:
+        with file_lock(deploy_lock_path, timeout=30):
+            # Execute file deployment
+            deploy_result = _apply_file_deploy(target, changes, version, manifest_id)
+
+            if deploy_result["success"]:
+                # Record backup file mappings in manifest for reliable rollback
+                backup_mapping = deploy_result.get("backup_mapping", [])
+                if backup_mapping:
+                    update_manifest_status(
+                        manifest_id, "deployed",
+                        extra_fields={"backup_files": backup_mapping},
+                    )
+                else:
+                    update_manifest_status(manifest_id, "deployed")
+
+                # 写入热加载标记
+                _trigger_reload(target)
+                return {
+                    "success": True,
+                    "version": version,
+                    "manifest_id": manifest_id,
+                    "details": deploy_result.get("details", {}),
+                }
+            else:
+                update_manifest_status(manifest_id, "failed")
+                return {
+                    "success": False,
+                    "version": None,
+                    "manifest_id": manifest_id,
+                    "error": deploy_result.get("error", "部署失败"),
+                }
+    except TimeoutError:
+        return {
+            "success": False,
+            "error": "部署锁超时，可能有并发部署正在进行",
+        }
+    except Exception as e:
+        update_manifest_status(manifest_id, "failed")
+        return {"success": False, "error": f"部署异常: {e}"}
+
+
+def _apply_file_deploy(
+    target: str, changes: List[Dict], version: str, manifest_id: str
+) -> Dict:
+    """
+    通过文件原子写入执行变更。
+
+    策略: 先备份目标文件，写入临时文件，然后 rename 做原子替换。
+    Windows NTFS 上 rename 是原子操作。
+
+    P1-E fix: Records backup_file -> original_path mapping for reliable rollback.
+    P1-F fix: On any failure mid-deploy, restores all already-written files
+    from their backups to maintain system consistency.
+    """
+    result: Dict = {
+        "success": True,
+        "details": {"applied_changes": []},
+        "backup_mapping": [],
+    }
+    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    short_id = manifest_id[:8]
+
+    # P1-F fix: Track successfully deployed files for rollback on failure
+    deployed_files: List = []  # list of (original_path, backup_path or None)
+
+    try:
+        for change in changes:
+            action = change.get("action", "")
+
+            if action == "integrate_mechanism":
+                mechanism = change.get("mechanism", "unknown")
+                target_module = change.get("target_module", target)
+                integration = change.get("integration", {})
+
+                # 写机制配置文件
+                mech_dir = EVOLVE_DIR / "mechanisms"
+                mech_dir.mkdir(parents=True, exist_ok=True)
+                mech_path = mech_dir / f"{mechanism}.json"
+
+                # 备份旧文件（如果存在）
+                backup_path = None
+                if mech_path.exists():
+                    backup_name = f"{mechanism}_{short_id}.json"
+                    backup_path = BACKUPS_DIR / backup_name
+                    shutil.copy2(str(mech_path), str(backup_path))
+                    result["backup_mapping"].append({
+                        "backup_file": str(backup_path),
+                        "original_path": str(mech_path),
+                    })
+
+                # 原子写入: 先写临时文件，再 rename
+                tmp_path = mech_path.with_suffix(".tmp")
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "mechanism": mechanism,
+                        "target": target_module,
+                        "version": version,
+                        "integration": integration,
+                        "manifest_id": manifest_id,
+                        "applied_at": utcnow_iso(),
+                    }, f, indent=2, ensure_ascii=False)
+                tmp_path.rename(mech_path)
+
+                deployed_files.append(
+                    (str(mech_path), str(backup_path) if backup_path else None)
+                )
+                result["details"]["applied_changes"].append(
+                    f"written: {mech_path}"
+                )
+
+            elif action == "modify_search_loop":
+                parameter = change.get("parameter", "")
+                to_val = change.get("to", "")
+
+                config_path = EVOLVE_DIR / "config" / "deployed_params.json"
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # 备份旧配置
+                backup_path = None
+                if config_path.exists():
+                    backup_name = f"deployed_params_{short_id}.json"
+                    backup_path = BACKUPS_DIR / backup_name
+                    shutil.copy2(str(config_path), str(backup_path))
+                    result["backup_mapping"].append({
+                        "backup_file": str(backup_path),
+                        "original_path": str(config_path),
+                    })
+
+                # 读取现有配置
+                params = {}
+                if config_path.exists():
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        params = json.load(f)
+
+                params[parameter] = {
+                    "value": to_val,
+                    "version": version,
+                    "manifest_id": manifest_id,
+                    "applied_at": utcnow_iso(),
+                }
+
+                # 原子写入
+                tmp_path = config_path.with_suffix(".tmp")
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(params, f, indent=2, ensure_ascii=False)
+                tmp_path.rename(config_path)
+
+                deployed_files.append(
+                    (str(config_path), str(backup_path) if backup_path else None)
+                )
+                result["details"]["applied_changes"].append(
+                    f"written: {config_path} ({parameter} = {to_val})"
+                )
+
+            elif action == "modify_skill_file":
+                # P2 fix: Actually modify skill files (SKILL.md, prompts/, .skill files)
+                skill_name = change.get("skill_name", target)
+                file_path_relative = change.get("file_path", "")
+                new_content = change.get("new_content", "")
+                operation = change.get("operation", "replace")  # replace | append | patch
+
+                if not file_path_relative or not new_content:
+                    result["details"]["applied_changes"].append(
+                        "skipped: modify_skill_file missing file_path or new_content"
+                    )
+                    continue
+
+                # P0-A fix: Validate path to prevent traversal attacks
+                safe_path = _validate_file_path(file_path_relative, skill_name)
+                if safe_path is None:
+                    result["details"]["applied_changes"].append(
+                        f"skipped: modify_skill_file path traversal blocked: {file_path_relative}"
+                    )
+                    continue
+
+                # Resolve target file path under skills directory
+                target_file = SKILLS_DIR / skill_name / safe_path
+
+                # Backup old file if exists
+                backup_path = None
+                if target_file.exists():
+                    backup_name = f"{target_file.stem}_{short_id}{target_file.suffix}"
+                    backup_path = BACKUPS_DIR / backup_name
+                    shutil.copy2(str(target_file), str(backup_path))
+                    result["backup_mapping"].append({
+                        "backup_file": str(backup_path),
+                        "original_path": str(target_file),
+                    })
+
+                target_file.parent.mkdir(parents=True, exist_ok=True)
+
+                if operation == "append" and target_file.exists():
+                    with open(target_file, "r", encoding="utf-8") as f:
+                        old_content = f.read()
+                    new_content = old_content + "\n" + new_content
+
+                # Atomic write: tmp file then rename
+                tmp_path = target_file.with_suffix(target_file.suffix + ".tmp")
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                tmp_path.rename(target_file)
+
+                deployed_files.append(
+                    (str(target_file), str(backup_path) if backup_path else None)
+                )
+                result["details"]["applied_changes"].append(
+                    f"modified: {target_file} ({operation})"
+                )
+
+    except Exception as deploy_error:
+        # P1-F fix: Rollback all successfully deployed files
+        rollback_errors = []
+        for orig_path, bk_path in reversed(deployed_files):
+            try:
+                orig = Path(orig_path)
+                if bk_path and Path(bk_path).exists():
+                    shutil.copy2(bk_path, orig_path)
+                else:
+                    # No backup means file was newly created — remove it
+                    if orig.exists():
+                        orig.unlink()
+            except Exception as rb_err:
+                rollback_errors.append(f"Failed to rollback {orig_path}: {rb_err}")
+
+        result["success"] = False
+        result["error"] = f"Deploy failed: {deploy_error}"
+        if rollback_errors:
+            result["error"] += f" | Rollback errors: {'; '.join(rollback_errors)}"
+        result["details"]["deployed_before_failure"] = len(deployed_files)
+        result["details"]["rollback_completed"] = len(rollback_errors) == 0
+        return result
+
+    result["details"]["version"] = version
+    return result
+
+
+def _trigger_reload(target: str):
+    """写入热加载标记文件，OpenClaw 下次任务时检测并重新扫描 skills 目录。
+
+    P2-L fix: Use atomic write (tmp file + rename) to prevent partial reads.
+    """
+    trigger_data = {
+        "timestamp": time.time(),
+        "skills_changed": [target],
+        "action": "rescan",
+    }
+    tmp_path = RELOAD_TRIGGER.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(trigger_data, f, indent=2, ensure_ascii=False)
+    tmp_path.rename(RELOAD_TRIGGER)
+
+
+def list_manifests(target: Optional[str] = None, limit: int = 20) -> List[Dict]:
+    """列出部署历史 Manifest"""
+    manifests = load_all_manifests()
+    if target:
+        manifests = [m for m in manifests if m.get("target") == target]
+    return manifests[-limit:]
+
+
+def _validate_proposal(proposal: dict) -> List[str]:
+    errors: List[str] = []
+    if not isinstance(proposal, dict):
+        return ["Proposal 不是 dict 类型"]
+    if "target" not in proposal:
+        errors.append("缺少 target")
+    if "status" not in proposal:
+        errors.append("缺少 status")
+    if "benchmark" not in proposal:
+        errors.append("缺少 benchmark 数据")
+    cand = proposal.get("candidate", {})
+    if not cand.get("changes"):
+        errors.append("candidate.changes 为空，没有可部署的变更")
+    return errors
+
+
+def _next_version(target: str) -> str:
+    manifests = load_all_manifests()
+    target_manifests = [m for m in manifests if m.get("target") == target]
+    if not target_manifests:
+        return f"{target}-v1"
+    versions = []
+    for m in target_manifests:
+        v = m.get("version", "")
+        parts = v.split("-v")
+        if len(parts) == 2 and parts[1].isdigit():
+            versions.append(int(parts[1]))
+    next_num = max(versions) + 1 if versions else 1
+    return f"{target}-v{next_num}"

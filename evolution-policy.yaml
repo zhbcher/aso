@@ -1,0 +1,41 @@
+# evolution-policy.yaml for OpenClaw
+# Evolution 安全策略 - 不可被 Evolution 自身修改
+# 定义哪些 Target 可被修改、哪些不可触碰
+
+policy:
+  # 允许演化的目标
+  allow:
+    - planner
+    - workflow
+    - prompt
+    - memory
+    - skill
+    - router
+
+  # 禁止触碰的目标（OpenClaw 特定）
+  deny:
+    - runtime
+    - gateway
+    - scheduler
+    - kernel
+    - evolution-policy.yaml
+    - trace_schema.yaml
+    # OpenClaw 敏感文件保护
+    - openclaw.json
+    - secret.json
+    - AGENTS.md
+    - SOUL.md
+    - USER.md
+    - MEMORY.md
+
+# Generator 级别的 Target Scope 限制
+generator_scopes:
+  bilevel:
+    allowed_targets:
+      - planner
+      - workflow
+      - prompt
+      - memory
+      - skill
+      - router
+    deny: []

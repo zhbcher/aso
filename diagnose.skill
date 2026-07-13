@@ -1,0 +1,284 @@
+# diagnose.skill — Evolution Diagnosis Layer for KunlunXiaoZhi
+# 职责: 分析 Trace，输出瓶颈报告
+# P1 fix: 重写评分维度，从 OpenClaw planner/memory/router 改为昆仑小智特有的
+#   - tool_efficiency: 工具调用效率（冗余调用率、重复读取率）
+#   - task_quality: 任务完成质量（成功率、返工率）
+#   - skill_success: 技能调用成功率
+#   - context_utilization: 上下文利用率（会话长度 vs 有效信息比）
+# 输入: 符合 trace_schema v1 的 Trace 列表
+# 输出: BottleneckReport（概率性归因，标注置信度）
+
+from typing import Optional, List, Dict
+
+
+def diagnose(traces, report_fallback=None) -> dict:
+    """
+    分析结构化 Trace，计算昆仑小智各维度评分，输出瓶颈报告。
+
+    评分维度（0.0=差，1.0=好）:
+    - tool_efficiency: 工具调用效率，低冗余率得高分
+    - task_quality: 任务完成质量，高成功率得高分
+    - skill_success: 技能调用成功率
+    - context_utilization: 上下文信息密度
+
+    Args:
+        traces: 符合 trace_schema v1 的 Trace 列表。
+
+    Returns:
+        dict: BottleneckReport, 包含各维度评分和优先级排名。
+    """
+    if not traces:
+        return _empty_report("没有可用的 Trace 数据")
+
+    n = len(traces)
+    mid = max(n // 2, 1)
+
+    # P2-D fix: When n < 5, use all traces for scoring but mark trend as insufficient
+    recent = traces[:mid] if n > 1 else traces
+    earlier = traces[mid:] if n > 1 else []
+
+    # ---- Tool efficiency 评分 ----
+    tool_eff_recent = _tool_efficiency(recent)
+    tool_eff_earlier = _tool_efficiency(earlier)
+    tool_eff_trend = _calc_trend(tool_eff_recent, tool_eff_earlier, n)
+    tool_eff_confidence = _calc_confidence(n)
+
+    # ---- Task quality 评分 ----
+    task_q_recent = _task_quality(recent)
+    task_q_earlier = _task_quality(earlier)
+    task_q_trend = _calc_trend(task_q_recent, task_q_earlier, n)
+    task_q_confidence = _calc_confidence(n)
+
+    # ---- Skill success 评分 ----
+    skill_s_recent = _skill_success_rate(recent)
+    skill_s_earlier = _skill_success_rate(earlier)
+    skill_s_trend = _calc_trend(skill_s_recent, skill_s_earlier, n)
+    skill_s_confidence = _calc_confidence(n)
+
+    # ---- Context utilization 评分 ----
+    ctx_u_recent = _context_utilization(recent)
+    ctx_u_earlier = _context_utilization(earlier)
+    ctx_u_trend = _calc_trend(ctx_u_recent, ctx_u_earlier, n)
+    ctx_u_confidence = _calc_confidence(n)
+
+    # ---- Skills 聚合统计 ----
+    skills_stats = _analyze_skills(traces)
+
+    # ---- 优先级排序（低分优先修复）----
+    priorities = sorted(
+        [
+            ("tool_efficiency", tool_eff_recent, tool_eff_trend, tool_eff_confidence),
+            ("task_quality", task_q_recent, task_q_trend, task_q_confidence),
+            ("skill_success", skill_s_recent, skill_s_trend, skill_s_confidence),
+            ("context_utilization", ctx_u_recent, ctx_u_trend, ctx_u_confidence),
+        ],
+        key=lambda x: x[1],  # 按 score 升序
+    )
+
+    # ---- 检测合成数据 ----
+    synthetic_count = sum(1 for t in traces if t.get("source") == "synthetic")
+    is_synthetic = synthetic_count > n / 2
+
+    report = {
+        "tool_efficiency": {
+            "score": round(tool_eff_recent, 4),
+            "trend": tool_eff_trend,
+            "confidence": round(tool_eff_confidence, 4),
+        },
+        "task_quality": {
+            "score": round(task_q_recent, 4),
+            "trend": task_q_trend,
+            "confidence": round(task_q_confidence, 4),
+        },
+        "skill_success": {
+            "score": round(skill_s_recent, 4),
+            "trend": skill_s_trend,
+            "confidence": round(skill_s_confidence, 4),
+        },
+        "context_utilization": {
+            "score": round(ctx_u_recent, 4),
+            "trend": ctx_u_trend,
+            "confidence": round(ctx_u_confidence, 4),
+        },
+        "skills": skills_stats,
+        "priority": [p[0] for p in priorities],
+        "trace_count": n,
+        "analysis_confidence": _overall_confidence(n),
+        "data_source": "synthetic" if is_synthetic else "real",
+    }
+
+    if is_synthetic:
+        report["analysis_confidence"] = round(report["analysis_confidence"] * 0.3, 4)
+        report["warning"] = "基于合成数据，结论不可靠。建议收集真实 trace 后重新分析。"
+
+    return report
+
+
+def _tool_efficiency(traces):
+    """计算工具调用效率：低冗余率得高分。
+
+    冗余 = 同一工具在短时间内（3步内）被重复调用相同参数。
+    评分 = 1.0 - 冗余率
+    """
+    if not traces:
+        return 0.0
+
+    total_calls = 0
+    redundant_calls = 0
+
+    for t in traces:
+        skills = t.get("skills", [])
+        for i, s in enumerate(skills):
+            total_calls += 1
+            sid = s.get("id", "")
+            # Check if same tool was called within last 3 steps
+            for j in range(max(0, i - 3), i):
+                prev = skills[j]
+                if prev.get("id") == sid:
+                    # Same tool within 3 steps — potential redundancy
+                    redundant_calls += 1
+                    break
+
+    if total_calls == 0:
+        return 0.5  # neutral when no data
+
+    redundancy_rate = redundant_calls / total_calls
+    return max(0.0, 1.0 - redundancy_rate)
+
+
+def _task_quality(traces):
+    """计算任务完成质量：高成功率得高分。
+
+    成功 = trace 标记 success=True 或 planner.success=True
+    """
+    if not traces:
+        return 0.0
+
+    successes = sum(
+        1 for t in traces
+        if t.get("success", t.get("planner", {}).get("success", False))
+    )
+    return successes / len(traces)
+
+
+def _skill_success_rate(traces):
+    """计算所有技能调用的综合成功率。"""
+    if not traces:
+        return 0.0
+
+    total = 0
+    successful = 0
+    for t in traces:
+        for s in t.get("skills", []):
+            total += 1
+            if s.get("success", True):
+                successful += 1
+
+    if total == 0:
+        return 0.5  # neutral
+
+    return successful / total
+
+
+def _context_utilization(traces):
+    """计算上下文利用率：有效信息密度。
+
+    高分 = 短会话完成任务（少 token、少步骤）
+    低分 = 长会话才完成任务（大量 token、多步骤）
+    评分 = min(1.0, baseline / actual_tokens)
+    """
+    if not traces:
+        return 0.0
+
+    scores = []
+    for t in traces:
+        tokens = t.get("total_tokens", 0)
+        duration = t.get("total_duration_ms", 0)
+        skills_count = len(t.get("skills", []))
+
+        # Heuristic: ideal is < 5000 tokens and < 10 tool calls
+        token_score = min(1.0, 5000 / max(tokens, 1)) if tokens > 0 else 0.5
+        tool_score = min(1.0, 10 / max(skills_count, 1)) if skills_count > 0 else 0.5
+        scores.append((token_score + tool_score) / 2)
+
+    return sum(scores) / len(scores) if scores else 0.5
+
+
+def _calc_trend(recent: float, earlier: float, n: int = 0) -> str:
+    """计算趋势
+
+    P2-D fix: When n < 5, return 'insufficient_data' instead of 'stable'
+    because trend calculations on very small samples are unreliable.
+    """
+    if n > 0 and n < 5:
+        return "insufficient_data"
+    if earlier == 0:
+        return "stable"
+    delta = recent - earlier
+    if delta > 0.02:
+        return "improving"
+    elif delta < -0.02:
+        return "declining"
+    return "stable"
+
+
+def _calc_confidence(n: int) -> float:
+    """计算归因置信度。小样本低置信度。"""
+    if n < 5:
+        return 0.3
+    elif n < 20:
+        return 0.5
+    elif n < 100:
+        return 0.7
+    return 0.85
+
+
+def _overall_confidence(n: int) -> float:
+    """整体分析置信度"""
+    return min(_calc_confidence(n) + 0.1, 0.95)
+
+
+def _analyze_skills(traces):
+    """分析所有 skill 的调用分布、失败率、重试率。"""
+    stats = {}
+    for t in traces:
+        for s in t.get("skills", []):
+            sid = s.get("id", "unknown")
+            if sid not in stats:
+                stats[sid] = {
+                    "call_count": 0,
+                    "fail_count": 0,
+                    "total_retries": 0,
+                    "total_tokens": 0,
+                    "total_duration_ms": 0,
+                }
+            stats[sid]["call_count"] += 1
+            if not s.get("success", True):
+                stats[sid]["fail_count"] += 1
+            stats[sid]["total_retries"] += s.get("retry_count", 0)
+            stats[sid]["total_tokens"] += s.get("tokens", 0)
+            stats[sid]["total_duration_ms"] += s.get("duration_ms", 0)
+
+    for sid, st in stats.items():
+        st["fail_rate"] = round(
+            st["fail_count"] / st["call_count"], 4
+        ) if st["call_count"] > 0 else 0.0
+        st["avg_retry"] = round(
+            st["total_retries"] / st["call_count"], 2
+        ) if st["call_count"] > 0 else 0.0
+
+    return stats
+
+
+def _empty_report(reason: str) -> dict:
+    return {
+        "tool_efficiency": {"score": 0.0, "trend": "unknown", "confidence": 0.0},
+        "task_quality": {"score": 0.0, "trend": "unknown", "confidence": 0.0},
+        "skill_success": {"score": 0.0, "trend": "unknown", "confidence": 0.0},
+        "context_utilization": {"score": 0.0, "trend": "unknown", "confidence": 0.0},
+        "skills": {},
+        "priority": [],
+        "trace_count": 0,
+        "analysis_confidence": 0.0,
+        "error": reason,
+    }

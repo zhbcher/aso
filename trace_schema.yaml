@@ -1,0 +1,91 @@
+# TraceSchema v1 — OpenClaw Evolution 结构化 Trace 格式
+# 不可被 Evolution 自身修改（见 evolution-policy.yaml deny 列表）
+
+version: "v1"
+description: "Standardized trace schema for OpenClaw Evolution Package observation layer"
+
+fields:
+  task_id:
+    type: string
+    description: "Unique task identifier"
+    required: true
+
+  timestamp:
+    type: datetime
+    description: "Task execution timestamp (ISO 8601)"
+    required: true
+
+  agent:
+    type: object
+    description: "Agent execution metrics"
+    fields:
+      id:
+        type: string
+        description: "Agent identifier"
+      version:
+        type: string
+        description: "Agent version"
+      success:
+        type: boolean
+        description: "Whether task completed successfully"
+      latency_ms:
+        type: integer
+        description: "Agent execution time in milliseconds"
+
+  skills:
+    type: array
+    description: "Skills/tools called during task execution"
+    items:
+      type: object
+      fields:
+        id:
+          type: string
+          description: "Skill/tool identifier"
+        version:
+          type: string
+          description: "Skill/tool version"
+        duration_ms:
+          type: integer
+          description: "Skill execution time"
+        tokens:
+          type: integer
+          description: "Tokens consumed by this skill"
+        success:
+          type: boolean
+          description: "Whether skill executed successfully"
+        retry_count:
+          type: integer
+          description: "Number of retries"
+          default: 0
+        error:
+          type: string
+          description: "Error message if failed"
+          nullable: true
+
+  memory:
+    type: object
+    description: "Memory system metrics"
+    fields:
+      hit_rate:
+        type: float
+        description: "Memory hit rate (0.0-1.0)"
+        minimum: 0.0
+        maximum: 1.0
+      latency_ms:
+        type: integer
+        description: "Memory access latency"
+
+  total_tokens:
+    type: integer
+    description: "Total tokens consumed across all skills"
+    required: true
+
+  total_duration_ms:
+    type: integer
+    description: "Total task duration in milliseconds"
+    required: true
+
+  source:
+    type: string
+    description: "Data source identifier (e.g. openclaw_session, test)"
+    default: "openclaw_session"

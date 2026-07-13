@@ -1,0 +1,120 @@
+[
+  {
+    "id": "opt-self-001",
+    "description": "优化器应该识别并建议删除技能中的通用知识",
+    "prompt": "Optimize the skill 'example-hello' which has a long explanation about what JSON is.",
+    "files": [],
+    "setup": {
+      "skill_path": ".agents/skills/example-hello",
+      " existing_skill_content": "---\nname: example-hello\ndescription: A simple greeting skill\n---\n\n# Hello World\n\nThis skill prints a greeting.\n\n## What is JSON?\nJSON (JavaScript Object Notation) is a lightweight data-interchange format... (2000 tokens of explanation)\n\nWhen the user asks for a greeting, use `exec` to run `echo 'Hello!'`."
+    },
+    "expected_output": {
+      "should_contain": ["Use the exec tool"],
+      "should_not_contain": ["JSON", "JavaScript", "lightweight data-interchange"],
+      "max_tokens_increase": 0
+    },
+    "assertions": [
+      "Optimized SKILL.md does not mention JSON",
+      "Optimized SKILL.md body length < original length",
+      "Core functionality (use exec tool) is preserved"
+    ],
+    "severity": "high"
+  },
+  {
+    "id": "opt-self-002",
+    "description": "优化器应该提取重复逻辑到脚本并引用",
+    "prompt": "Optimize the skill 'data-processor' which contains inline data cleaning code in 3 different scenarios.",
+    "files": [],
+    "setup": {
+      "skill_path": ".agents/skills/data-processor",
+      "existing_skill_content": "---\nname: data-processor\ndescription: Processes data from various sources\n---\n\n# Data Processor\n\nWhen processing CSV: run `awk -F, '{print $1}'` to extract first column.\nWhen processing JSON: run `jq -r '.key'` to extract values.\nWhen processing Excel: use `in2csv` then same awk.\n\nAll these data extraction steps are repeated in multiple places."
+    },
+    "expected_output": {
+      "should_contain": ["scripts/extract_data.py", "Use the extraction script"],
+      "should_not_contain": ["awk", "jq", "in2csv"],
+      "script_exists": "scripts/extract_data.py"
+    },
+    "assertions": [
+      "A new script file is created under scripts/",
+      "SKILL.md references the script with relative path",
+      "Inline extraction commands are removed from SKILL.md"
+    ],
+    "severity": "medium"
+  },
+  {
+    "id": "opt-self-003",
+    "description": "优化器应该通过 Delta 门禁——只有正向改善的版本才被接受",
+    "prompt": "Attempt to optimize 'inefficient-skill' by adding a long verbose explanation (simulate a bad optimization).",
+    "files": [],
+    "setup": {
+      "skill_path": ".agents/skills/inefficient-skill",
+      "existing_skill_content": "---\nname: inefficient-skill\ndescription: Simple skill\n---\n\n# Simple\n\nJust do the thing.",
+      "baseline": {
+        "with_skill": {"pass_rate": {"mean": 0.90}, "tokens": {"mean": 800}, "time_seconds": {"mean": 1.2}}
+      }
+    },
+    "expected_output": {
+      "verdict": "failed",
+      "reason_contains": ["token", "increase", "pass_rate"]
+    },
+    "assertions": [
+      "Optimization verdict is 'failed'",
+      "Proposed changes would increase tokens by >20% without meaningful pass rate gain",
+      "Original skill is preserved (no overwrite)"
+    ],
+    "severity": "high"
+  },
+  {
+    "id": "opt-self-004",
+    "description": "优化器应该校准 trigger description 并达到验证集准确率 ≥ 0.85",
+    "prompt": "Optimize 'vague-skill' description for better trigger precision.",
+    "files": [],
+    "setup": {
+      "skill_path": ".agents/skills/vague-skill",
+      "existing_description": "Use this skill for various tasks.",
+      "trigger_test_set": {
+        "should_trigger": [
+          "I need help with code review",
+          "Can you review my pull request?",
+          "Check this function for bugs"
+        ],
+        "should_not_trigger": [
+          "What's the weather today?",
+          "Tell me a joke",
+          "How do I make coffee?"
+        ]
+      }
+    },
+    "expected_output": {
+      "new_description": "Use this skill when the user asks for code review, bug detection, or pull request analysis.",
+      "val_accuracy": 0.92
+    },
+    "assertions": [
+      "Description uses 'Use this skill when...' pattern",
+      "Validation accuracy >= 0.85",
+      "Training/validation gap <= 0.15"
+    ],
+    "severity": "medium"
+  },
+  {
+    "id": "opt-self-005",
+    "description": "优化器应该正确调用 skill_workshop 创建 proposal 而不是直接覆盖",
+    "prompt": "Optimize 'target-skill' and deliver via proposal.",
+    "files": [],
+    "setup": {
+      "skill_path": ".agents/skills/target-skill",
+      "workshop_available": true
+    },
+    "expected_output": {
+      "delivery_method": "skill_workshop_proposal",
+      "proposal_created": true,
+      "original_skill_intact": true
+    },
+    "assertions": [
+      "skill_workshop tool is called with action='create'",
+      "Proposal content contains optimized SKILL.md",
+      "Original file remains unchanged until approval"
+    ],
+    "severity": "high"
+  }
+]

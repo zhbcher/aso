@@ -1,0 +1,153 @@
+# rollback.skill -- Evolution Rollback Layer for OpenClaw
+# 职责: 从 _backups/ 目录恢复已部署的技能文件
+# 从 deploy.skill 拆分出来，可被 gate.skill 验证失败时独立触发
+
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+from typing import List, Dict, Optional
+
+# Add _lib to import path
+_lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_lib")
+if _lib_dir not in sys.path:
+    sys.path.insert(0, _lib_dir)
+
+from path_utils import EVOLVE_DIR, STATE_DIR, BACKUPS_DIR, MANIFESTS_FILE, RELOAD_TRIGGER
+from lock_utils import file_lock
+from time_utils import utcnow_iso as _utcnow_iso
+from manifest_utils import (
+    load_manifest as _load_manifest,
+    load_all_manifests as _load_all_manifests,
+    update_manifest_status as _update_manifest_status,
+)
+
+
+def rollback(manifest_id: str) -> dict:
+    """
+    基于 Manifest 记录回滚已部署的变更。
+
+    从 _backups/ 目录恢复备份文件，用 rename 做原子替换。
+
+    P1-E fix: Uses manifest's backup_files mapping for reliable path resolution,
+    instead of guessing from backup file names.
+
+    Args:
+        manifest_id: 部署时生成的 manifest_id
+
+    Returns:
+        dict: {success, error, restored_files}
+    """
+    manifest = _load_manifest(manifest_id)
+    if not manifest:
+        return {"success": False, "error": f"Manifest {manifest_id} 不存在"}
+
+    target = manifest.get("target", "unknown")
+    version = manifest.get("version", "unknown")
+
+    restored_files = []
+    errors = []
+
+    # P1-E fix: Use backup_files mapping from manifest if available
+    backup_files = manifest.get("backup_files", [])
+
+    if backup_files:
+        # Reliable path resolution: use recorded original_path
+        for entry in backup_files:
+            backup_path_str = entry.get("backup_file", "")
+            original_path_str = entry.get("original_path", "")
+
+            if not backup_path_str or not original_path_str:
+                continue
+
+            backup_path = Path(backup_path_str)
+            original_path = Path(original_path_str)
+
+            if not backup_path.exists():
+                errors.append(f"Backup file not found: {backup_path}")
+                continue
+
+            try:
+                original_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Atomic replace: restore backup to original location
+                if original_path.exists():
+                    tmp_path = original_path.with_suffix(".rollback_tmp")
+                    original_path.rename(tmp_path)
+                    shutil.copy2(str(backup_path), str(original_path))
+                    tmp_path.unlink(missing_ok=True)
+                else:
+                    shutil.copy2(str(backup_path), str(original_path))
+
+                restored_files.append(str(original_path))
+            except Exception as e:
+                errors.append(f"Failed to restore {original_path}: {e}")
+    else:
+        # Fallback for older manifests without backup_files mapping
+        short_id = manifest_id[:8]
+        if BACKUPS_DIR.exists():
+            for backup_file in BACKUPS_DIR.glob(f"*_{short_id}*"):
+                try:
+                    original_name = backup_file.name.rsplit(f"_{short_id}", 1)[0]
+                    if original_name.endswith(".json") and original_name != "deployed_params.json":
+                        target_path = EVOLVE_DIR / "mechanisms" / original_name
+                    else:
+                        target_path = EVOLVE_DIR / "config" / original_name
+
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    if target_path.exists():
+                        tmp_path = target_path.with_suffix(".rollback_tmp")
+                        target_path.rename(tmp_path)
+                        shutil.copy2(str(backup_file), str(target_path))
+                        tmp_path.unlink(missing_ok=True)
+                    else:
+                        shutil.copy2(str(backup_file), str(target_path))
+
+                    restored_files.append(str(target_path))
+                except Exception as e:
+                    errors.append(f"Failed to restore {backup_file}: {e}")
+
+    # 更新 manifest 状态
+    _update_manifest_status(manifest_id, "rolled_back",
+                           extra_fields={"rolled_back_at": _utcnow_iso()})
+
+    # 写入热加载标记
+    _trigger_reload(target)
+
+    success = len(errors) == 0
+    return {
+        "success": success,
+        "error": "; ".join(errors) if errors else None,
+        "restored_files": restored_files,
+        "manifest_id": manifest_id,
+        "target": target,
+        "version": version,
+    }
+
+
+def rollback_latest() -> dict:
+    """回滚最近一次部署。"""
+    manifests = _load_all_manifests()
+    deployed = [m for m in manifests if m.get("status") == "deployed"]
+    if not deployed:
+        return {"success": False, "error": "没有可回滚的部署记录"}
+    latest = deployed[-1]
+    return rollback(latest["manifest_id"])
+
+
+def _trigger_reload(target: str):
+    """写入热加载标记文件。
+
+    P2-L fix: Use atomic write (tmp file + rename) to prevent partial reads.
+    """
+    trigger_data = {
+        "timestamp": _utcnow_iso(),
+        "skills_changed": [target],
+        "action": "rescan",
+    }
+    tmp_path = RELOAD_TRIGGER.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(trigger_data, f, indent=2, ensure_ascii=False)
+    tmp_path.rename(RELOAD_TRIGGER)
