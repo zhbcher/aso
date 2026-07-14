@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import time
@@ -10,8 +11,13 @@ import traceback
 from importlib.machinery import SourceFileLoader
 from typing import Optional
 
-from _lib.path_utils import EVOLVE_DIR
+_LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_lib")
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+from path_utils import EVOLVE_DIR
+from pii_mask import mask
 from scope_policy import validate_target
+from _lib.exceptions import PipelineBudgetError as PipelineBudgetExceeded
 
 DEFAULT_BUDGET = {
     "max_tokens": 50000,
@@ -22,10 +28,6 @@ DEFAULT_BUDGET = {
 }
 
 
-class PipelineBudgetExceeded(Exception):
-    """Budget exceeded."""
-
-
 def run(
     target: str,
     strategy: str = "aso",
@@ -34,10 +36,22 @@ def run(
 ) -> dict:
     if budget is None:
         budget = DEFAULT_BUDGET.copy()
-    result = {"pipeline_steps": [], "errors": [], "success": False, "budget_used": {"tokens": 0, "time_sec": 0.0, "cost": 0.0}}
+    result = {
+        "pipeline_steps": [],
+        "errors": [],
+        "success": False,
+        "budget_used": {"tokens": 0, "time_sec": 0.0, "cost": 0.0},
+    }
     budget_start = time.time()
     budget_tokens = 0
     budget_cost = 0.0
+
+    cb = _CircuitBreaker(str(EVOLVE_DIR))
+    suspended, reason = cb.suspended_reason(target)
+    if suspended:
+        result["errors"].append(reason)
+        result["success"] = False
+        return result
 
     if not validate_target(target):
         result["errors"].append(f"Target '{target}' denied by evolution-policy")
@@ -49,6 +63,14 @@ def run(
     if observe_module is None:
         raise RuntimeError("observe.skill not available")
     traces = observe_module.observe(target=target, count=trace_count)
+    try:
+        for tr in traces or []:
+            text = json.dumps(tr, ensure_ascii=False)
+            masked = mask(text)
+            if masked != text:
+                tr["_pii_masked"] = True
+    except Exception:
+        pass
     result["pipeline_steps"].append({"step": "observe", "status": "ok" if traces else "empty", "trace_count": len(traces)})
     if not traces:
         result["errors"].append("observe returned empty trace list")
@@ -79,6 +101,7 @@ def run(
         result["pipeline_steps"].append({"step": "gate", "status": "passed" if gate_result.get("passed", False) else "failed", "passed_count": gate_result.get("passed_count", 0), "failed_count": gate_result.get("failed_count", 0), "checks": gate_result.get("checks", [])})
         if not gate_result.get("passed", False):
             result["errors"].append(f"Gate failed: {gate_result.get('summary', '')}")
+            cb.record_failure(target, result)
             result["success"] = False
             result["budget_used"] = {"tokens": budget_tokens, "time_sec": round(time.time() - budget_start, 2), "cost": round(budget_cost, 4)}
             return result
@@ -97,6 +120,7 @@ def run(
     _check_budget(budget, budget_tokens, budget_cost, time.time() - budget_start)
     if has_error:
         result["errors"].append(f"Sandbox error: {sandbox_result.get('error', 'unknown')}")
+        cb.record_failure(target, result)
         result["success"] = False
         result["budget_used"] = {"tokens": budget_tokens, "time_sec": round(time.time() - budget_start, 2), "cost": round(budget_cost, 4)}
         return result
@@ -109,9 +133,12 @@ def run(
     result["proposal"] = proposal
     result["success"] = proposal.get("valid", False)
     if not result["success"]:
+        cb.record_failure(target, result)
         warnings = proposal.get("validation_errors", [])
         if warnings:
             result["errors"].extend(warnings)
+    else:
+        cb.record_success(target, result)
 
     result["budget_used"] = {"tokens": budget_tokens, "time_sec": round(time.time() - budget_start, 2), "cost": round(budget_cost, 4)}
     return result
@@ -172,3 +199,56 @@ def _load_generator(strategy: str):
         print(f"[evolve] Failed to load generator/{strategy}.py: {exc}", file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return None
+
+
+class _CircuitBreaker:
+    def __init__(self, evolve_dir: str):
+        self._path = os.path.join(evolve_dir, "state", "manifests.json")
+
+    def suspended_reason(self, target: str) -> tuple[bool, str]:
+        try:
+            data = self._read()
+        except Exception:
+            return False, ""
+        entry = data.get("_circuit", {}).get(target)
+        if not entry:
+            return False, ""
+        if int(entry.get("consecutive_failures", 0)) >= 3:
+            return True, (
+                f"Target '{target}' is suspended by circuit breaker after "
+                f"{entry.get('consecutive_failures')} consecutive failures."
+            )
+        return False, ""
+
+    def record_success(self, target: str, result: dict) -> None:
+        data = self._read()
+        data.setdefault("_circuit", {})
+        if target in data["_circuit"]:
+            data["_circuit"][target].pop("consecutive_failures", None)
+            data["_circuit"][target].pop("last_error", None)
+        self._write(data)
+
+    def record_failure(self, target: str, result: dict) -> None:
+        data = self._read()
+        data.setdefault("_circuit", {})
+        entry = data["_circuit"].setdefault(target, {})
+        entry["consecutive_failures"] = int(entry.get("consecutive_failures", 0)) + 1
+        entry["last_error"] = (result.get("errors") or [""])[-1]
+        self._write(data)
+
+    def _read(self) -> dict:
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _write(self, data: dict) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            tmp = self._path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(tmp, self._path)
+        except Exception:
+            pass

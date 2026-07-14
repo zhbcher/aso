@@ -8,6 +8,12 @@
     },
     "tokens": {
       "mean": 0.0
+    },
+    "tool_call_rate": {
+      "mean": 0.0
+    },
+    "latency_ms": {
+      "mean": 0.0
     }
   },
   "with_skill": {
@@ -18,6 +24,12 @@
       "mean": 0.0
     },
     "tokens": {
+      "mean": 0.0
+    },
+    "tool_call_rate": {
+      "mean": 0.0
+    },
+    "latency_ms": {
       "mean": 0.0
     }
   },

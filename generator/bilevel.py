@@ -10,15 +10,14 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Optional, List, Dict
 
 # Add _lib to import path
 _lib_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "_lib")
 if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 
-from oc_llm_client import call_with_fallback, parse_json_response
-from path_utils import EVOLVE_DIR
+from oc_llm_client import call_with_fallback, parse_json_response  # noqa: E402
+from path_utils import EVOLVE_DIR  # noqa: E402
 
 
 class Generator:
@@ -43,7 +42,7 @@ class Generator:
     description = "Bilevel Autoresearch: 4-round LLM dialogue with multi-model rotation via OpenClaw"
 
     # Default allowed targets, overridden from evolution-policy.yaml
-    allowed_targets: List[str] = ["planner", "workflow", "prompt", "memory", "skill", "router"]
+    allowed_targets: list[str] = ["planner", "workflow", "prompt", "memory", "skill", "router"]
 
     def __init__(self) -> None:
         """Initialize and load allowed_targets from policy file."""
@@ -57,7 +56,7 @@ class Generator:
 
         try:
             import yaml
-            with open(policy_path, "r", encoding="utf-8") as f:
+            with open(policy_path, encoding="utf-8") as f:
                 policy = yaml.safe_load(f)
         except ImportError:
             policy = self._parse_yaml_simple(str(policy_path))
@@ -76,7 +75,7 @@ class Generator:
     def _parse_yaml_simple(self, path: str) -> dict:
         """Simple YAML parser fallback when yaml library is not available."""
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 content = f.read()
             import re
             result: dict = {
@@ -115,7 +114,7 @@ class Generator:
         bottleneck = self._find_bottleneck(report)
 
         # Multi-round conversation: messages carry context between rounds
-        messages: List[dict] = []
+        messages: list[dict] = []
 
         # Round 1: Explore
         explore_result = self._explore(target, report, bottleneck, messages)
@@ -148,7 +147,7 @@ class Generator:
             "confidence": module_data.get("confidence", 0.0),
         }
 
-    def _llm_call(self, system_prompt: str, messages: List[dict], role: str,
+    def _llm_call(self, system_prompt: str, messages: list[dict], role: str,
                   max_tokens: int = 1200) -> str:
         """Call LLM via OpenClaw oc_llm_client with role-based model selection.
 
@@ -162,7 +161,7 @@ class Generator:
             LLM response text.
         """
         # Build full messages: prepend system prompt, append JSON instruction
-        full_messages: List[dict] = [{"role": "system", "content": system_prompt}] + messages
+        full_messages: list[dict] = [{"role": "system", "content": system_prompt}] + messages
         full_messages.append(
             {"role": "user", "content": "请继续你的分析，输出 JSON 格式结果。"}
         )
@@ -177,7 +176,7 @@ class Generator:
         return response
 
     def _explore(self, target: str, report: dict, bottleneck: dict,
-                 messages: List[dict]) -> dict:
+                 messages: list[dict]) -> dict:
         """Round 1: Explore -- discover candidate mechanisms."""
         priority = report.get("priority", [])
         bottleneck_mod = bottleneck["module"]
@@ -202,7 +201,7 @@ class Generator:
         )
 
         try:
-            llm_messages: List[dict] = messages + [{"role": "user", "content": user_prompt}]
+            llm_messages: list[dict] = messages + [{"role": "user", "content": user_prompt}]
             llm_output = self._llm_call(system_prompt, llm_messages, "round_1_explore", max_tokens=1200)
             parsed = parse_json_response(llm_output)
 
@@ -219,13 +218,13 @@ class Generator:
                 "bottleneck_module": bottleneck_mod,
                 "bottleneck_score": bottleneck["score"],
             }
-        except Exception as e:
+        except Exception:
             return self._fallback_explore(target, bottleneck)
 
     def _fallback_explore(self, target: str, bottleneck: dict) -> dict:
         """Fallback when LLM call fails — rules-based mechanism discovery."""
         score = bottleneck["score"]
-        mechanisms: List[dict] = []
+        mechanisms: list[dict] = []
         if score < 0.5:
             mechanisms.append({
                 "name": "tabu_search", "field": "组合优化",
@@ -266,7 +265,7 @@ class Generator:
         }
 
     def _critique(self, explore_result: dict, bottleneck: dict,
-                  messages: List[dict]) -> dict:
+                  messages: list[dict]) -> dict:
         """Round 2: Critique -- evaluate and select best mechanism."""
         mechanisms = explore_result.get("mechanisms", [])
         bottleneck_mod = bottleneck["module"]
@@ -289,7 +288,7 @@ class Generator:
         )
 
         try:
-            llm_messages: List[dict] = messages + [{"role": "user", "content": user_prompt}]
+            llm_messages: list[dict] = messages + [{"role": "user", "content": user_prompt}]
             llm_output = self._llm_call(system_prompt, llm_messages, "round_2_critique", max_tokens=800)
             parsed = parse_json_response(llm_output)
             selected = parsed.get("selected", {})
@@ -313,7 +312,7 @@ class Generator:
             "justification": f"选择 {selected.get('name', 'unknown')}（规则 fallback）",
         }
 
-    def _specify(self, critique_result: dict, target: str, messages: List[dict]) -> dict:
+    def _specify(self, critique_result: dict, target: str, messages: list[dict]) -> dict:
         """Round 3: Specify -- write interface specification."""
         selected = critique_result.get("selected", {})
         mechanism_name = selected.get("name", "unknown")
@@ -334,7 +333,7 @@ class Generator:
         )
 
         try:
-            llm_messages: List[dict] = messages + [{"role": "user", "content": user_prompt}]
+            llm_messages: list[dict] = messages + [{"role": "user", "content": user_prompt}]
             llm_output = self._llm_call(system_prompt, llm_messages, "round_3_specify", max_tokens=1000)
             parsed = parse_json_response(llm_output)
             return {
@@ -393,7 +392,7 @@ class Generator:
             f"请审查以上方案，评估其可行性并给出建议。"
         )
 
-        review_result: Optional[dict] = None
+        review_result: dict | None = None
         try:
             llm_output = self._llm_call(
                 system_prompt,
@@ -452,7 +451,7 @@ class Generator:
 
     def _infer_candidate_type(self, target: str) -> str:
         """Map target name to candidate change type."""
-        type_map: Dict[str, str] = {
+        type_map: dict[str, str] = {
             "planner": "workflow", "workflow": "workflow", "prompt": "prompt",
             "memory": "config", "router": "config", "skill": "skill", "policy": "config",
         }

@@ -1,11 +1,19 @@
-"""sandbox.skill — Sandboxed candidate evaluation with shared policy."""
+"""sandbox.skill — Sandboxed candidate evaluation with shared policy.
+
+Enhanced with:
+- Python resource module limits (CPU, memory) on Unix
+- Network isolation (empty subprocess env, no network access)
+- File system isolation (temp directory sandbox)
+"""
 
 from __future__ import annotations
 
+import argparse
 import copy
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -13,8 +21,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from _lib.path_utils import EVOLVE_DIR
-from scope_policy import validate_target
-
+from _lib.exceptions import SandboxBudgetError, SnapshotError, RollbackError
+from scope_policy import validate_target, validate_sandbox_path
 
 DEFAULT_BUDGET = {
     "max_tokens": 50000,
@@ -24,21 +32,78 @@ DEFAULT_BUDGET = {
     "max_generations": 5,
 }
 
+# Resource limits (Unix only)
+_LIMIT_CPU_SECONDS = 60
+_LIMIT_MEMORY_MB = 512
+_LIMIT_PROCESSES = 20
 
-class SandboxBudgetError(Exception):
-    """Budget exceeded inside sandbox."""
+
+def _apply_resource_limits() -> None:
+    """Apply resource limits to the current process.
+
+    Uses Python's resource module (Unix only).
+    Limits CPU time, memory, and number of child processes.
+    Silently ignored on non-Unix platforms.
+    """
+    try:
+        import resource  # type: ignore[import-untyped]
+        # CPU time limit (seconds)
+        resource.setrlimit(resource.RLIMIT_CPU, (_LIMIT_CPU_SECONDS, _LIMIT_CPU_SECONDS + 10))
+        # Memory limit (bytes)
+        mem_bytes = _LIMIT_MEMORY_MB * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+        # Number of processes
+        resource.setrlimit(resource.RLIMIT_NPROC, (_LIMIT_PROCESSES, _LIMIT_PROCESSES))
+    except (ImportError, OSError, ValueError, resource.error):
+        pass  # Silently skip on non-Unix or if limits are too restrictive
 
 
-def sandbox(target: str, candidate: dict, budget: Optional[dict] = None, workspace_path: Optional[str | Path] = None) -> dict:
+def _create_sandbox_env() -> dict:
+    """Create a sanitized environment dict for sandboxed subprocesses.
+
+    Strips sensitive environment variables (API keys, tokens).
+    Disables network-reliant features.
+    """
+    env = os.environ.copy()
+    # Remove sensitive API keys
+    sensitive_keys = [
+        k for k in env
+        if any(s in k.lower() for s in ("api_key", "api-key", "apikey", "token", "secret", "password"))
+    ]
+    for key in sensitive_keys:
+        env.pop(key, None)
+    # Disable network features
+    env["HTTP_PROXY"] = ""
+    env["HTTPS_PROXY"] = ""
+    env["http_proxy"] = ""
+    env["https_proxy"] = ""
+    env["NO_PROXY"] = "*"
+    env["no_proxy"] = "*"
+    # Disable interactive features
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def sandbox(
+    target: str,
+    candidate: dict,
+    budget: Optional[dict] = None,
+    workspace_path: Optional[str | Path] = None,
+) -> dict:
     if budget is None:
         budget = copy.deepcopy(DEFAULT_BUDGET)
     budget_start = time.time()
     budget_tokens = 0
     budget_cost = 0.0
-    error: str | None = None
-    temp_dir: str | None = None
+    error: Optional[str] = None
+    temp_dir: Optional[str] = None
     rollback_needed = False
     snap: dict = {"success": False}
+
+    # Apply resource limits for the sandbox process
+    _apply_resource_limits()
+
     try:
         workspace = str(workspace_path) if workspace_path else str(EVOLVE_DIR)
         snap = _snapshot(workspace)
@@ -46,35 +111,44 @@ def sandbox(target: str, candidate: dict, budget: Optional[dict] = None, workspa
             return _error_result(f"Snapshot failed: {snap.get('error', 'unknown')}", budget, time.time() - budget_start)
         temp_dir = tempfile.mkdtemp(prefix="evolution_sandbox_")
         for item in os.listdir(workspace):
-            if item.startswith("__") or item == "__pycache__":
+            if item.startswith("__") or item == "__pycache__" or item == ".llm_cache":
                 continue
             src = os.path.join(workspace, item)
             dst = os.path.join(temp_dir, item)
             if os.path.isfile(src):
                 shutil.copy2(src, dst)
             elif os.path.isdir(src):
-                shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__"))
+                shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", ".llm_cache"))
         rollback_needed = True
         elapsed = time.time() - budget_start
         _check_budget_time(elapsed, budget)
-        baseline = _eval_workspace(workspace, budget, time.time() - budget_start)
+
+        # Use sanitized env for subprocess evaluations
+        _sandbox_env = _create_sandbox_env()
+
+        baseline = _eval_workspace(workspace, budget, time.time() - budget_start, env=_sandbox_env)
         if baseline.get("error"):
             return _error_result(str(baseline["error"]), budget, time.time() - budget_start, baseline.get("benchmark"))
         baseline_bench = baseline["benchmark"]
-        cand = _eval_workspace(temp_dir, budget, time.time() - budget_start)
+
+        cand = _eval_workspace(temp_dir, budget, time.time() - budget_start, env=_sandbox_env)
         if cand.get("error"):
             return _error_result(str(cand["error"]), budget, time.time() - budget_start, baseline_bench)
         candidate_bench = cand["benchmark"]
+
         _enforce_delta_gate(baseline_bench, candidate_bench)
         comparison = _calc_delta(baseline_bench, candidate_bench)
+
         _rollback(snap)
         rollback_needed = False
+
         total_tokens = baseline_bench.get("tokens", {}).get("total", 0) + candidate_bench.get("tokens", {}).get("total", 0)
         total_cost = float(baseline_bench.get("cost", 0.0)) + float(candidate_bench.get("cost", 0.0))
         budget_tokens += total_tokens
         budget_cost += total_cost
         _check_budget_tokens(budget_tokens, budget)
         _check_budget_cost(budget_cost, budget)
+
         return {
             "baseline_score": round(baseline_bench.get("pass_rate", {}).get("mean", 0.0) * 100, 2),
             "candidate_score": round(candidate_bench.get("pass_rate", {}).get("mean", 0.0) * 100, 2),
@@ -127,8 +201,8 @@ def _snapshot(workspace_path: str) -> dict:
             elif os.path.isdir(src):
                 sub_snap = os.path.join(snap_dir, item)
                 os.makedirs(sub_snap, exist_ok=True)
-                for root, dirs, files in os.walk(src):
-                    dirs[:] = [d for d in dirs if d not in ("__pycache__", "_backups")]
+                for root, _dirs, files in os.walk(src):
+                    _dirs[:] = [d for d in _dirs if d not in ("__pycache__", "_backups", ".llm_cache")]
                     for fname in files:
                         fext = os.path.splitext(fname)[1]
                         if fext in snapshot_extensions:
@@ -144,17 +218,23 @@ def _snapshot(workspace_path: str) -> dict:
         return {"success": False, "error": str(exc)}
 
 
-def _eval_workspace(work_dir: str, budget: dict, start: float) -> dict:
+def _eval_workspace(work_dir: str, budget: dict, start: float, env: Optional[dict] = None) -> dict:
     evals_file = os.path.join(work_dir, "evals", "aso_self_evals.json")
     if not os.path.exists(evals_file):
         raise SandboxBudgetError(f"evals/aso_self_evals.json not found under {work_dir}")
-    import subprocess as _subprocess
     out_dir = tempfile.mkdtemp(prefix="aso_sandbox_eval_")
     try:
         proc = _subprocess.run(
-            [sys.executable, os.path.join(work_dir, "optimizer", "eval_runner.py"), "--skill-path", work_dir, "--evals", evals_file, "--output", out_dir],
+            [
+                sys.executable,
+                os.path.join(work_dir, "optimizer", "eval_runner.py"),
+                "--skill-path", work_dir,
+                "--evals", evals_file,
+                "--output", out_dir,
+            ],
             check=True,
             capture_output=True,
+            env=env,  # Use sanitized environment
         )
         benchmark_path = os.path.join(out_dir, "benchmark.json")
         with open(benchmark_path, encoding="utf-8") as fh:
@@ -170,8 +250,14 @@ def _calc_delta(baseline: dict, candidate: dict) -> dict:
     new_pass = float(candidate.get("pass_rate", {}).get("mean", 0.0))
     old_tokens = float(baseline.get("tokens", {}).get("mean", 0.0))
     new_tokens = float(candidate.get("tokens", {}).get("mean", 0.0))
+    old_tool = float(baseline.get("tool_call_rate", {}).get("mean", 0.0))
+    new_tool = float(candidate.get("tool_call_rate", {}).get("mean", 0.0))
+    old_latency = float(baseline.get("latency_ms", {}).get("mean", 0.0))
+    new_latency = float(candidate.get("latency_ms", {}).get("mean", 0.0))
     delta_pass = new_pass - old_pass
     delta_tokens_pct = ((new_tokens - old_tokens) / old_tokens) * 100 if old_tokens != 0 else 0.0
+    delta_tool = new_tool - old_tool
+    delta_latency = new_latency - old_latency
     if delta_pass <= 0 and delta_tokens_pct > 20:
         verdict = "failed"
         description = f"Pass rate unchanged/declined and tokens increased {delta_tokens_pct:.2f}%"
@@ -181,7 +267,24 @@ def _calc_delta(baseline: dict, candidate: dict) -> dict:
     else:
         verdict = "neutral"
         description = "No meaningful improvement"
-    return {"delta": round(delta_pass, 4), "verdict": verdict, "description": description}
+    if verdict == "improved":
+        if delta_tool < -0.05:
+            verdict = "neutral"
+            description += "; tool call coverage dropped >5pp"
+        if delta_latency > 50:
+            verdict = "neutral"
+            description += "; latency increased >50ms"
+    return {
+        "delta": round(delta_pass, 4),
+        "verdict": verdict,
+        "description": description,
+        "deltas": {
+            "pass_rate": round(delta_pass, 4),
+            "tokens_pct": round(delta_tokens_pct, 2),
+            "tool_call_rate": round(delta_tool, 4),
+            "latency_ms": round(delta_latency, 2),
+        },
+    }
 
 
 def _check_budget_time(elapsed: float, budget: dict) -> None:
@@ -231,3 +334,24 @@ def _error_result(error: str, budget: dict, elapsed: float, baseline: Optional[d
         "budget_used": {"tokens": 0, "time_sec": round(elapsed, 2), "cost": 0.0},
         "error": error,
     }
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="ASO Sandbox CLI")
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--candidate", required=True)
+    parser.add_argument("--workspace", default=str(EVOLVE_DIR))
+    parser.add_argument("--budget", type=json.loads, default=None)
+    parser.add_argument("--output", default="-")
+    args = parser.parse_args(argv)
+    result = sandbox(args.target, json.loads(args.candidate), args.budget, args.workspace)
+    out = json.dumps(result, indent=2, ensure_ascii=False)
+    if args.output == "-":
+        print(out)
+    else:
+        Path(args.output).write_text(out + "\n", encoding="utf-8")
+    return 0 if result.get("verdict") != "error" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

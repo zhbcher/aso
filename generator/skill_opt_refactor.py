@@ -2,10 +2,10 @@
 # 职责: 将 skill-opt 的 TDO 优化流程封装为 evolve 的 generator 插件
 # 类型: Generator Plugin for evolve
 
-import sys
 import subprocess
+import sys
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
 
 # 本技能根目录
 ASO_DIR = Path(__file__).parent.parent
@@ -13,7 +13,7 @@ ASO_DIR = Path(__file__).parent.parent
 class SkillOptRefactor:
     name = "aso"
 
-    def generate(self, target: str, traces: list, budget: dict, **kwargs) -> Dict[str, Any]:
+    def generate(self, target: str, traces: list, budget: dict, **kwargs) -> dict[str, Any]:
         """
         执行 skill-opt 优化流水线:
           1. 若有 trace，转换为 evals (trace_to_eval.py)

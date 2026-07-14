@@ -35,7 +35,7 @@ def test_missing_policy_allows_all(tmp_path):
 
 
 def test_path_validation_blocks_traversal():
-    skills_dir = str((ASO_DIR / "tests" / "fake_skills"))
+    skills_dir = str(ASO_DIR / "tests" / "fake_skills")
     assert scope_policy.validate_sandbox_path("SKILL.md", "planner", skills_dir) == "SKILL.md"
     assert scope_policy.validate_sandbox_path("../../etc/passwd", "planner", skills_dir) is None
     assert scope_policy.validate_sandbox_path("/etc/passwd", "planner", skills_dir) is None

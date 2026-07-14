@@ -1,16 +1,17 @@
 # _lib/manifest_utils.py -- Shared manifest CRUD operations
 # Eliminates _load_manifest / _load_all_manifests / _update_manifest_status
 # duplication between deploy.skill and rollback.skill
+from __future__ import annotations
 
 import json
 import os
-from typing import Optional
-from _lib.path_utils import MANIFESTS_FILE
+
 from _lib.lock_utils import file_lock
+from _lib.path_utils import MANIFESTS_FILE
 from _lib.time_utils import utcnow_iso
 
 
-def load_manifest(manifest_id: str) -> Optional[dict]:
+def load_manifest(manifest_id: str) -> dict | None:
     """Find a manifest by its ID. Returns None if not found."""
     for m in load_all_manifests():
         if m.get("manifest_id") == manifest_id:
@@ -23,9 +24,9 @@ def load_all_manifests() -> list[dict]:
     if not MANIFESTS_FILE.exists():
         return []
     try:
-        with open(MANIFESTS_FILE, "r", encoding="utf-8") as f:
+        with open(MANIFESTS_FILE, encoding="utf-8") as f:
             return json.load(f)
-    except (IOError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError):
         return []
 
 
@@ -38,7 +39,7 @@ def store_manifest(manifest_id: str, manifest: dict) -> bool:
         with file_lock(lock_path, timeout=10):
             manifests = []
             if MANIFESTS_FILE.exists():
-                with open(MANIFESTS_FILE, "r", encoding="utf-8") as f:
+                with open(MANIFESTS_FILE, encoding="utf-8") as f:
                     manifests = json.load(f)
             manifests.append(manifest)
             # P2-L fix: Atomic write
@@ -47,11 +48,11 @@ def store_manifest(manifest_id: str, manifest: dict) -> bool:
                 json.dump(manifests, f, indent=2, default=str, ensure_ascii=False)
             os.replace(tmp_path, str(MANIFESTS_FILE))
         return True
-    except (IOError, json.JSONDecodeError, TimeoutError):
+    except (OSError, json.JSONDecodeError, TimeoutError):
         return False
 
 
-def update_manifest_status(manifest_id: str, new_status: str, extra_fields: Optional[dict] = None) -> bool:
+def update_manifest_status(manifest_id: str, new_status: str, extra_fields: dict | None = None) -> bool:
     """Update a manifest's status with file locking.
 
     Args:
@@ -64,7 +65,7 @@ def update_manifest_status(manifest_id: str, new_status: str, extra_fields: Opti
         with file_lock(lock_path, timeout=10):
             if not MANIFESTS_FILE.exists():
                 return False
-            with open(MANIFESTS_FILE, "r", encoding="utf-8") as f:
+            with open(MANIFESTS_FILE, encoding="utf-8") as f:
                 manifests = json.load(f)
             for m in manifests:
                 if m.get("manifest_id") == manifest_id:
@@ -79,5 +80,5 @@ def update_manifest_status(manifest_id: str, new_status: str, extra_fields: Opti
                 json.dump(manifests, f, indent=2, default=str, ensure_ascii=False)
             os.replace(tmp_path, str(MANIFESTS_FILE))
         return True
-    except (IOError, json.JSONDecodeError, TimeoutError):
+    except (OSError, json.JSONDecodeError, TimeoutError):
         return False

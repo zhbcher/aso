@@ -3,15 +3,12 @@
 
 import os
 import sys
-import importlib
-from pathlib import Path
 
 # Add _lib to import path
 _lib_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "_lib")
 if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 
-from _lib.path_utils import EVOLVE_DIR
 
 
 class GeneratorRegistry:

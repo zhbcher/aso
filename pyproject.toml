@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "aso"
+version = "1.0.0"
+description = "ASO (Automatic Skill Optimizer) — Self-improving skill evolution for OpenClaw"
+authors = [
+    {name = "OpenClaw Contributors"},
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["openclaw", "skill", "optimizer", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Distributed Computing",
+]
+
+dependencies = [
+    "pyyaml>=6.0",
+    "filelock>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.4.0",
+    "mypy>=1.8.0",
+    "pyyaml>=6.0",
+    "filelock>=3.0",
+]
+test = [
+    "pytest>=7.0",
+]
+lint = [
+    "ruff>=0.4.0",
+    "mypy>=1.8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/openclaw/aso"
+Repository = "https://github.com/openclaw/aso"
+Documentation = "https://github.com/openclaw/aso/docs"
+
+[tool.setuptools.packages.find]
+include = ["aso*", "_lib*", "generator*", "optimizer*"]
+
+[tool.setuptools.package-data]
+aso = ["config.yaml", "evolution-policy.yaml", "trace_schema.yaml", "trace_schema.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["__pycache__", ".git", ".pytest_cache"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM"]
+ignore = ["E501"]  # Line length handled by formatter
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
+warn_unused_ignores = true
+exclude = ["__pycache__", ".git"]

@@ -21,6 +21,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+
 def create_snapshot(skill_path: str, iteration: int, workspace_dir: str, extra_files: list = None) -> str:
     """
     Create a snapshot of the current skill state.
@@ -117,7 +118,7 @@ def restore_snapshot(iteration: int, workspace_dir: str, skill_path: str) -> boo
     # Find the skill source inside snapshot (assuming it's under skill_src/)
     skill_src = snapshot_dir / "skill_src"
     if not skill_src.exists():
-        print(f"Error: no skill_src in snapshot", file=sys.stderr)
+        print("Error: no skill_src in snapshot", file=sys.stderr)
         return False
 
     # Restore SKILL.md and all other files

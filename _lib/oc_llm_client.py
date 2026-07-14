@@ -3,84 +3,91 @@
 适配自 KLXZ evolve-skill-v4 _lib/klzm_client.py。
 将 KLXZ 的 klzm-proxy 调用改为直接调用 OpenClaw 配置的 LLM provider。
 支持多模型轮换 + fallback 链 + 重试 + 429 退避。
+
+Configuration is now loaded from config.yaml via config_loader.
 """
 
+from __future__ import annotations
+
+import contextlib
 import json
-import os
 import re
 import time
-import urllib.request
 import urllib.error
-from typing import Optional, List, Dict
+import urllib.request
 
-# === OpenClaw model providers ===
-# Models available in OpenClaw (reading from env vars)
-# Configured in openclaw.json skills.entries.moa.env
+from _lib.config_loader import get_default, get_fallback_chain, get_pipeline_models, get_providers
+from _lib.exceptions import (
+    JSONParseError,
+    LLMAuthError,
+    LLMConnectionError,
+    LLMContentPolicyError,
+    LLMEmptyResponseError,
+    LLMProviderError,
+    LLMQuotaExceededError,
+    LLMRateLimitError,
+    classify_llm_error,
+)
 
-PROVIDERS = {
-    "sensenova": {
-        "base_url": "https://api.sensenova.cn/v1/chat/completions",
-        "api_key_env": "SENSENOVA_API_KEY",
-        "models": ["deepseek-v4-flash", "sensenova-6.7-flash-lite"],
-    },
-    "nvidia": {
-        "base_url": "https://api.nvidia.com/v1/chat/completions",
-        "api_key_env": "NVIDIA_API_KEY",
-        "models": ["stepfun-ai/step-3.7-flash", "stepfun-ai/step-3.5-flash", "nvidia/llama-3.3-nemotron-super-49b-v1"],
-    },
-    "agnes": {
-        "base_url": "https://api.agnesai.com/v1/chat/completions",
-        "api_key_env": "AGNES_API_KEY",
-        "models": ["agnes-2.0-flash"],
-    },
-}
+# Load config from config.yaml
+PROVIDERS = get_providers()
+PIPELINE_MODELS = get_pipeline_models()
+FALLBACK_CHAIN = get_fallback_chain()
 
-# Role-based model assignment for bilevel generator (4 rounds)
-PIPELINE_MODELS = {
-    "round_1_explore": {"provider": "sensenova", "model": "deepseek-v4-flash"},
-    "round_2_critique": {"provider": "nvidia", "model": "stepfun-ai/step-3.7-flash"},
-    "round_3_specify": {"provider": "sensenova", "model": "deepseek-v4-flash"},
-    "round_4_review": {"provider": "nvidia", "model": "stepfun-ai/step-3.5-flash"},
-}
-
-# Fallback chain: if primary model fails, try next in this order
-FALLBACK_CHAIN = [
-    {"provider": "sensenova", "model": "deepseek-v4-flash"},
-    {"provider": "nvidia", "model": "stepfun-ai/step-3.7-flash"},
-    {"provider": "nvidia", "model": "stepfun-ai/step-3.5-flash"},
-    {"provider": "sensenova", "model": "sensenova-6.7-flash-lite"},
-]
-
-DEFAULT_TIMEOUT = 60  # seconds
-MAX_RETRIES = 2
-RETRY_DELAY = 1.0
-MAX_429_RETRIES = 3
-INITIAL_BACKOFF_429 = 2.0
-MAX_RETRY_AFTER = 60
+DEFAULT_TIMEOUT = get_default("timeout_seconds", 60)
+MAX_RETRIES = get_default("max_retries", 2)
+RETRY_DELAY = get_default("retry_delay_seconds", 1.0)
+MAX_429_RETRIES = get_default("max_429_retries", 3)
+INITIAL_BACKOFF_429 = get_default("initial_backoff_429_seconds", 2.0)
+MAX_RETRY_AFTER = get_default("max_retry_after_seconds", 60)
 
 
 def _get_api_key(provider: str) -> str:
     """Get API key for a given provider from environment variables."""
+    import os
     provider_config = PROVIDERS.get(provider)
     if not provider_config:
         return ""
-    return os.environ.get(provider_config["api_key_env"], "")
+    return os.environ.get(provider_config.get("api_key_env", ""), "")
 
 
 def _clean_think_tags(text: str) -> str:
-    """Remove  thinking... response blocks from model output."""
+    """Remove thinking blocks from model output."""
     if not text:
         return ""
-    cleaned = re.sub(r" thinking[\s\S]*? response", "", cleaned, flags=re.IGNORECASE) if False else text
+    cleaned = text
     cleaned = re.sub(r"<think>[\s\S]*?<\/think>", "", cleaned, flags=re.IGNORECASE)
-    # Also handle  and  (OpenClaw reasoning markers)
     cleaned = re.sub(r"<thinking>[\s\S]*?<\/thinking>", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"<Thought>[\s\S]*?<\/Thought>", "", cleaned, flags=re.IGNORECASE)
     return cleaned.strip()
 
 
+def _build_request(provider_config: dict, model: str, messages: list, temperature: float, max_tokens: int) -> urllib.request.Request:
+    """Build an HTTP request for the LLM API."""
+    api_key = _get_api_key(provider_config.get("name", ""))
+    if not api_key:
+        raise LLMAuthError(f"{provider_config.get('api_key_env', '?')} not set")
+
+    body = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+
+    return urllib.request.Request(
+        provider_config["base_url"],
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+
+
 def call_llm(
-    messages: List[Dict],
+    messages: list[dict],
     provider: str = "sensenova",
     model: str = "deepseek-v4-flash",
     temperature: float = 0.7,
@@ -101,16 +108,17 @@ def call_llm(
         Model response text.
 
     Raises:
-        RuntimeError if API call fails.
+        LLMProviderError (or subclass) on failure.
     """
     provider_config = PROVIDERS.get(provider)
     if not provider_config:
-        raise RuntimeError(f"Unknown provider: {provider}")
+        raise LLMProviderError(f"Unknown provider: {provider}")
 
     api_key = _get_api_key(provider)
     if not api_key:
-        raise RuntimeError(f"{provider_config['api_key_env']} not set")
+        raise LLMAuthError(f"{provider_config.get('api_key_env', '?')} not set")
 
+    # Build the request (handle provider name lookup by matching config keys)
     body = {
         "model": model,
         "messages": messages,
@@ -128,7 +136,7 @@ def call_llm(
         method="POST",
     )
 
-    last_error = None
+    last_error: LLMProviderError | None = None
     retry_429_count = 0
     for attempt in range(MAX_RETRIES + 1):
         try:
@@ -138,67 +146,49 @@ def call_llm(
                 content = msg.get("content", "")
                 if content:
                     content = _clean_think_tags(content)
-                return content.strip() if content else ""
+                if not content:
+                    raise LLMEmptyResponseError("LLM returned empty content after cleaning")
+                return content.strip()
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8", errors="replace")
-            if e.code == 429 and retry_429_count < MAX_429_RETRIES:
+            typed_error = classify_llm_error(f"HTTP {e.code}: {error_body[:200]}")
+
+            # Non-retryable errors
+            if isinstance(typed_error, (LLMAuthError, LLMQuotaExceededError, LLMContentPolicyError)):
+                raise typed_error from None
+
+            if isinstance(typed_error, LLMRateLimitError) and retry_429_count < MAX_429_RETRIES:
                 retry_429_count += 1
                 retry_after = INITIAL_BACKOFF_429 * (2 ** (retry_429_count - 1))
                 header_retry_after = e.headers.get("Retry-After") or e.headers.get("retry-after")
                 if header_retry_after:
-                    try:
+                    with contextlib.suppress(ValueError, TypeError):
                         retry_after = min(float(header_retry_after), MAX_RETRY_AFTER)
-                    except (ValueError, TypeError):
-                        pass
                 retry_after = min(retry_after, MAX_RETRY_AFTER)
-                last_error = RuntimeError(f"HTTP 429: {error_body[:200]}")
+                last_error = typed_error
                 time.sleep(retry_after)
-                req = urllib.request.Request(
-                    provider_config["base_url"],
-                    data=json.dumps(body).encode("utf-8"),
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {api_key}",
-                    },
-                    method="POST",
-                )
                 continue
+
             if e.code >= 500 and attempt < MAX_RETRIES:
-                last_error = RuntimeError(f"HTTP {e.code}: {error_body[:300]}")
+                last_error = typed_error
                 time.sleep(RETRY_DELAY)
-                req = urllib.request.Request(
-                    provider_config["base_url"],
-                    data=json.dumps(body).encode("utf-8"),
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {api_key}",
-                    },
-                    method="POST",
-                )
                 continue
-            raise RuntimeError(f"HTTP {e.code}: {error_body[:300]}")
+
+            raise typed_error from None
+
         except urllib.error.URLError as e:
             if attempt < MAX_RETRIES:
-                last_error = RuntimeError(f"Connection failed: {e.reason}")
+                last_error = LLMConnectionError(f"Connection failed: {e.reason}")
                 time.sleep(RETRY_DELAY)
-                req = urllib.request.Request(
-                    provider_config["base_url"],
-                    data=json.dumps(body).encode("utf-8"),
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {api_key}",
-                    },
-                    method="POST",
-                )
                 continue
-            raise RuntimeError(f"Connection failed: {e.reason}")
+            raise LLMConnectionError(f"Connection failed: {e.reason}") from e
 
-    raise last_error or RuntimeError("max retries exhausted")
+    raise last_error or LLMProviderError("max retries exhausted")
 
 
 def call_with_fallback(
-    messages: List[Dict],
-    role: Optional[str] = None,
+    messages: list[dict],
+    role: str | None = None,
     temperature: float = 0.7,
     max_tokens: int = 2048,
     timeout: int = DEFAULT_TIMEOUT,
@@ -216,7 +206,7 @@ def call_with_fallback(
         Response text.
 
     Raises:
-        RuntimeError if all models in the fallback chain fail.
+        LLMProviderError if all models in the fallback chain fail.
     """
     if role and role in PIPELINE_MODELS:
         primary = PIPELINE_MODELS[role]
@@ -230,7 +220,7 @@ def call_with_fallback(
         if f"{m['provider']}/{m['model']}" != primary_key
     ]
 
-    last_error = None
+    last_error: Exception | None = None
     for model_entry in attempt_order:
         try:
             response = call_llm(
@@ -243,16 +233,16 @@ def call_with_fallback(
             )
             if response:
                 return response
-        except RuntimeError as e:
+        except LLMProviderError as e:
             last_error = e
             continue
 
-    raise RuntimeError(
+    raise LLMProviderError(
         f"All models exhausted for role '{role}'. Last error: {last_error}"
     )
 
 
-def parse_json_response(text: str) -> Dict:
+def parse_json_response(text: str) -> dict:
     """Parse JSON from LLM response text with multiple fallback strategies.
 
     Handles:
@@ -260,9 +250,12 @@ def parse_json_response(text: str) -> Dict:
     - ```json ... ``` code blocks
     - Bare { ... } objects
     - Common JSON formatting issues (single quotes, trailing commas, comments)
+
+    Raises:
+        JSONParseError if all strategies fail.
     """
     if not text or not text.strip():
-        raise ValueError("LLM returned empty content")
+        raise JSONParseError("LLM returned empty content")
 
     text = text.strip()
 
@@ -306,4 +299,4 @@ def parse_json_response(text: str) -> Dict:
     except json.JSONDecodeError:
         pass
 
-    raise ValueError(f"Cannot parse JSON from LLM response:\n{text[:500]}")
+    raise JSONParseError(f"Cannot parse JSON from LLM response:\n{text[:500]}")

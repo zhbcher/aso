@@ -4,18 +4,17 @@
 从 OpenClaw 的会话数据生成标准化 trace。
 """
 
-import json
-import os
+from __future__ import annotations
+
 import datetime as dt
-from datetime import datetime
+import json
 from pathlib import Path
-from typing import Optional, List, Dict
 
 from _lib.path_utils import WORKSPACE_ROOT
 from _lib.time_utils import utcnow_iso
 
 
-def load_recent_traces(limit: int = 20) -> List[Dict]:
+def load_recent_traces(limit: int = 20) -> list[dict]:
     """从 OpenClaw 工作区读取会话数据并转换为 trace。
 
     数据源:
@@ -65,7 +64,7 @@ def load_recent_traces(limit: int = 20) -> List[Dict]:
     return traces[-limit:] if traces else []
 
 
-def _parse_session_file(fpath: Path) -> Optional[Dict]:
+def _parse_session_file(fpath: Path) -> dict | None:
     """解析单个会话文件，转换为 trace 格式。
 
     Args:
@@ -78,9 +77,9 @@ def _parse_session_file(fpath: Path) -> Optional[Dict]:
         return None
 
     try:
-        with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+        with open(fpath, encoding="utf-8", errors="replace") as f:
             data = json.load(f)
-    except (json.JSONDecodeError, IOError):
+    except (OSError, json.JSONDecodeError):
         return None
 
     # 处理不同的文件格式
@@ -92,7 +91,7 @@ def _parse_session_file(fpath: Path) -> Optional[Dict]:
     return None
 
 
-def _parse_jsonl_style(fpath: Path, entries: List) -> Optional[Dict]:
+def _parse_jsonl_style(fpath: Path, entries: list) -> dict | None:
     """解析类似 JSONL 的会话文件（数组格式）。
 
     参考 KLXZ 的 JSONL 格式：
@@ -103,7 +102,6 @@ def _parse_jsonl_style(fpath: Path, entries: List) -> Optional[Dict]:
 
     messages = []
     tool_calls = []
-    reasoning_count = 0
     first_timestamp = None
     total_tokens = 0
     total_duration = 0
@@ -115,9 +113,8 @@ def _parse_jsonl_style(fpath: Path, entries: List) -> Optional[Dict]:
         entry_type = entry.get("type", "")
         ts = entry.get("timestamp")
 
-        if ts:
-            if first_timestamp is None:
-                first_timestamp = ts
+        if ts and first_timestamp is None:
+            first_timestamp = ts
 
         if entry_type == "message":
             role = entry.get("role", "unknown")
@@ -194,7 +191,7 @@ def _parse_jsonl_style(fpath: Path, entries: List) -> Optional[Dict]:
     }
 
 
-def _parse_dict_session(data: Dict, fpath: Path) -> Optional[Dict]:
+def _parse_dict_session(data: dict, fpath: Path) -> dict | None:
     """解析字典格式的会话数据。"""
     skills = data.get("skills", data.get("tools", []))
     if not isinstance(skills, list):
