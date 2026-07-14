@@ -23,6 +23,15 @@ GENERATOR_DIR = EVOLVE_DIR / "generator"
 # State files
 MANIFESTS_FILE = STATE_DIR / "manifests.json"
 TRACE_STORE_FILE = STATE_DIR / "trace_store.json"
+OPTIMIZATION_MEMORY_FILE = STATE_DIR / "optimization_memory.json"
+
+# Evolution state (ASO v2)
+EVOLUTION_DIR = STATE_DIR / "evolution"
+EVOLUTION_SESSIONS_DIR = EVOLUTION_DIR / "sessions"
+EVOLUTION_EVENTS_DIR = EVOLUTION_DIR / "events"
+EVOLUTION_INDEX_FILE = EVOLUTION_DIR / "index.json"
+EVOLUTION_EVENTS_FILE = EVOLUTION_EVENTS_DIR / "journal.jsonl"
+EVOLUTION_POLICY_FILE = STATE_DIR / "evolution-policy.yaml"
 
 # Config files
 POLICY_FILE = EVOLVE_DIR / "evolution-policy.yaml"
@@ -48,7 +57,7 @@ PROTECTED_FILES = [
 
 def ensure_dirs():
     """Ensure all required directories exist."""
-    for d in [STATE_DIR, BACKUPS_DIR, GENERATOR_DIR]:
+    for d in [STATE_DIR, BACKUPS_DIR, GENERATOR_DIR, EVOLUTION_SESSIONS_DIR, EVOLUTION_EVENTS_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
 

@@ -1,0 +1,24 @@
+{
+  "golden_id": "golden-bef25507",
+  "task_id": "golden-test",
+  "target": "test-planner",
+  "description": "test golden",
+  "expected_outcome": {
+    "success": true,
+    "max_tokens": 200,
+    "max_steps": 0
+  },
+  "added_by": "test",
+  "added_at": "2026-07-14T13:43:47.471336+00:00",
+  "tags": [],
+  "status": "active",
+  "trace": {
+    "task_id": "golden-test",
+    "success": true,
+    "agent": {
+      "id": "test-planner"
+    },
+    "skills": [],
+    "total_tokens": 100
+  }
+}

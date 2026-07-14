@@ -7,7 +7,6 @@ import json
 import os
 import sys
 
-# P2-H fix: Use shared time_utils instead of duplicating _utcnow_iso()
 _lib_dir = os.path.join(os.path.dirname(__file__), "_lib")
 if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
@@ -27,26 +26,24 @@ def build_proposal(
     将整个演化过程打包为标准化 Evolution Proposal。
 
     Args:
-        target:        演化目标
-        strategy:      使用的生成策略
-        traces:        observe 输出的 Trace 列表
-        report:        diagnose 输出的 BottleneckReport
-        candidate:     generator 输出的候选方案
+        target: 演化目标
+        strategy: 使用的生成策略
+        traces: observe 输出的 Trace 列表
+        report: diagnose 输出的 BottleneckReport
+        candidate: generator 输出的候选方案
         sandbox_result: sandbox 评估结果
 
     Returns:
         dict: 标准化的 Evolution Proposal，可直接输出为 YAML。
-              验证字段完整性后返回，异常时返回错误 dict。
+        验证字段完整性后返回，异常时返回错误 dict。
     """
     # 提取时间范围
     timestamps = [
-        t.get("timestamp") for t in traces
-        if t.get("timestamp")
+        t.get("timestamp") for t in traces if t.get("timestamp")
     ]
     obs_start = min(timestamps) if timestamps else "unknown"
     obs_end = max(timestamps) if timestamps else "unknown"
 
-    # 构建 Proposal
     proposal = {
         "proposal_version": "v1",
         "timestamp": _utcnow_iso(),
@@ -90,22 +87,17 @@ def build_proposal(
         "status": "proposed",
     }
 
-    # 验证
     errors = _validate(proposal)
     if errors:
         proposal["validation_errors"] = errors
         proposal["valid"] = False
     else:
         proposal["valid"] = True
-
     return proposal
 
 
 def proposal_to_yaml(proposal: dict) -> str:
-    """
-    将 Proposal dict 序列化为 YAML 格式字符串。
-    如果没有 yaml 库，fallback 到 JSON。
-    """
+    """将 Proposal dict 序列化为 YAML 格式字符串。 如果没有 yaml 库，fallback 到 JSON。"""
     try:
         import yaml
         return yaml.dump(proposal, default_flow_style=False, sort_keys=False)
@@ -121,12 +113,17 @@ def proposal_to_json(proposal: dict) -> str:
 def _validate(proposal: dict) -> list[str]:
     """校验 Proposal 字段完整性"""
     errors = []
-
     required_fields = [
-        "proposal_version", "timestamp", "target", "strategy",
-        "observation_range", "diagnosis", "candidate", "benchmark", "status",
+        "proposal_version",
+        "timestamp",
+        "target",
+        "strategy",
+        "observation_range",
+        "diagnosis",
+        "candidate",
+        "benchmark",
+        "status",
     ]
-
     for field in required_fields:
         if field not in proposal:
             errors.append(f"缺少必填字段: {field}")
@@ -135,17 +132,55 @@ def _validate(proposal: dict) -> list[str]:
     obs = proposal.get("observation_range", {})
     if "tasks_count" not in obs:
         errors.append("observation_range 缺少 tasks_count")
-
     bench = proposal.get("benchmark", {})
     if "baseline_score" not in bench or "candidate_score" not in bench:
         errors.append("benchmark 缺少评分字段")
-
     cand = proposal.get("candidate", {})
     if "changes" not in cand or not isinstance(cand.get("changes"), list):
         errors.append("candidate 缺少 changes 列表")
-
     diag = proposal.get("diagnosis", {})
     if "priority" not in diag:
         errors.append("diagnosis 缺少 priority 列表")
-
     return errors
+
+
+def build_memory_entry(
+    session_id: str,
+    target: str,
+    reflection: dict,
+    candidate: dict,
+    sandbox_result: dict,
+    budget_used: dict = None,
+) -> dict:
+    """
+    将本次演化会话打包为 Optimization Memory entry 字典。
+    供 orchestrate.skill 在 deploy 成功流程中调用，写入 optimization_memory。
+    参数均来自上游步骤输出；调用方负责 try/except，保证 Memory 写入失败不阻断 Pipeline。
+    """
+    failure_type = (reflection or {}).get("failure_type", "UNCLEAR")
+    root_cause = (reflection or {}).get("root_cause", "")
+    confidence = (reflection or {}).get("confidence", 0.5)
+
+    verdict = (sandbox_result or {}).get("verdict", "unknown")
+    deployed = verdict in ("approved", "improved")
+
+    operation_types = (candidate or {}).get("operation_types")
+    if not operation_types:
+        ctype = (candidate or {}).get("type", "config")
+        operation_types = [ctype]
+
+    return {
+        "session_id": session_id,
+        "target": target,
+        "operation_types": operation_types,
+        "failure_pattern": failure_type,
+        "root_cause": root_cause,
+        "delta_summary": (candidate or {}).get("description", ""),
+        "outcome": {
+            "pass_rate_delta": (sandbox_result or {}).get("delta", 0.0),
+            "tokens_delta": (budget_used or {}).get("tokens", 0),
+            "deployed": deployed,
+            "rolled_back": False,
+        },
+        "confidence": confidence,
+    }

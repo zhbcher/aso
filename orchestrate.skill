@@ -1,4 +1,13 @@
-"""Evolution pipeline orchestrator for OpenClaw."""
+"""orchestrate.skill — ASO v2 Evolution Pipeline Orchestrator.
+
+Upgraded from v1:
+- Evolution Session lifecycle (create/update/save artifacts)
+- Reflect Engine integration (diagnose → reflect → generate)
+- Policy Engine evaluation (auto_approve / require_review / auto_reject)
+- Event journal logging
+- Optimization Memory update on deploy
+- Backward compatible run() interface
+"""
 
 from __future__ import annotations
 
@@ -18,6 +27,12 @@ from path_utils import EVOLVE_DIR
 from pii_mask import mask
 from scope_policy import validate_target
 from _lib.exceptions import PipelineBudgetError as PipelineBudgetExceeded
+from _lib.session_manager import (
+    create_session, update_session, save_session_artifact,
+)
+from _lib.event_manager import emit as emit_event
+from _lib.policy_engine import evaluate as evaluate_policy
+from _lib.optimization_memory import add_entry as add_opt_memory_entry
 
 DEFAULT_BUDGET = {
     "max_tokens": 50000,
@@ -34,18 +49,36 @@ def run(
     budget: Optional[dict] = None,
     trace_count: int = 100,
 ) -> dict:
+    """
+    Run the ASO v2 evolution pipeline.
+
+    Pipeline: scope_check → observe → diagnose → reflect → generate → gate → sandbox → report
+    Integrated with: Session, Events, Policy Engine, Optimization Memory.
+
+    Args:
+        target: Skill to optimize (planner, router, workflow, etc.)
+        strategy: Generator strategy (aso, bilevel)
+        budget: Pipeline budget constraints
+        trace_count: Number of traces to observe
+
+    Returns:
+        dict: Pipeline result with steps, errors, proposal, success status.
+    """
     if budget is None:
         budget = DEFAULT_BUDGET.copy()
+
     result = {
         "pipeline_steps": [],
         "errors": [],
         "success": False,
+        "session_id": None,
         "budget_used": {"tokens": 0, "time_sec": 0.0, "cost": 0.0},
     }
     budget_start = time.time()
     budget_tokens = 0
     budget_cost = 0.0
 
+    # ── Circuit breaker ──
     cb = _CircuitBreaker(str(EVOLVE_DIR))
     suspended, reason = cb.suspended_reason(target)
     if suspended:
@@ -53,12 +86,20 @@ def run(
         result["success"] = False
         return result
 
+    # ── Scope check ──
     if not validate_target(target):
         result["errors"].append(f"Target '{target}' denied by evolution-policy")
         result["success"] = False
         return result
-    result["pipeline_steps"].append({"step": "scope_check", "status": "passed", "target": target})
+    _add_step(result, "scope_check", "passed", target=target)
 
+    # ── Session init ──
+    session_id = create_session(target=target, trigger="manual", trace_count=trace_count)
+    result["session_id"] = session_id
+    emit_event("session.started", target, session_id, payload={"trace_count": trace_count})
+    _add_step(result, "session_init", "ok", session_id=session_id)
+
+    # ── Observe ──
     observe_module = _load_skill("observe")
     if observe_module is None:
         raise RuntimeError("observe.skill not available")
@@ -71,125 +112,240 @@ def run(
                 tr["_pii_masked"] = True
     except Exception:
         pass
-    result["pipeline_steps"].append({"step": "observe", "status": "ok" if traces else "empty", "trace_count": len(traces)})
     if not traces:
         result["errors"].append("observe returned empty trace list")
         result["success"] = False
-        result["pipeline_steps"].append({"step": "diagnose", "status": "skipped", "reason": "no trace data"})
+        update_session(session_id, "observe", "empty", {"trace_count": 0})
+        emit_event("session.failed", target, session_id, payload={"error": "empty traces"})
+        _add_step(result, "observe", "empty", trace_count=0)
         result["budget_used"] = {"tokens": 0, "time_sec": round(time.time() - budget_start, 2), "cost": 0.0}
         return result
     budget_tokens += sum(t.get("total_tokens", 0) for t in traces)
     _check_budget(budget, budget_tokens, budget_cost, time.time() - budget_start)
+    update_session(session_id, "observe", "ok", {"trace_count": len(traces)})
+    save_session_artifact(session_id, "observation.json", {"trace_count": len(traces)})
+    emit_event("session.step_completed", target, session_id, payload={"step": "observe", "trace_count": len(traces)})
+    _add_step(result, "observe", "ok", trace_count=len(traces))
 
+    # ── Diagnose ──
     diagnose_module = _load_skill("diagnose")
     if diagnose_module is None:
         raise RuntimeError("diagnose.skill not available")
     report = diagnose_module.diagnose(traces)
-    result["pipeline_steps"].append({"step": "diagnose", "status": "ok", "priority": report.get("priority", [])})
+    update_session(session_id, "diagnose", "ok", {"priority": report.get("priority", [])})
+    save_session_artifact(session_id, "diagnosis.json", report)
+    emit_event("session.step_completed", target, session_id, payload={"step": "diagnose"})
+    _add_step(result, "diagnose", "ok", priority=report.get("priority", []))
     _check_budget(budget, budget_tokens, budget_cost, time.time() - budget_start)
 
+    # ── Reflect (NEW) ──
+    reflect_module = _load_skill("reflect")
+    if reflect_module is None:
+        raise RuntimeError("reflect.skill not available")
+    reflection = reflect_module.reflect(traces, report)
+    update_session(session_id, "reflect", "ok", {
+        "failure_type": reflection.get("failure_type", "UNCLEAR"),
+        "confidence": reflection.get("confidence", 0.0),
+    })
+    save_session_artifact(session_id, "reflection.json", reflection)
+    emit_event("session.step_completed", target, session_id, payload={
+        "step": "reflect", "failure_type": reflection.get("failure_type"),
+    })
+    _add_step(result, "reflect", "ok", failure_type=reflection.get("failure_type"),
+              confidence=reflection.get("confidence"))
+    _check_budget(budget, budget_tokens, budget_cost, time.time() - budget_start)
+
+    # ── Generate ──
     generator = _load_generator(strategy)
     if generator is None:
         raise RuntimeError(f"generator/{strategy}.py not available")
     candidate = generator.generate(target=target, report=report)
-    result["pipeline_steps"].append({"step": "generate", "status": "ok", "generator": strategy, "candidate_type": candidate.get("type", "unknown"), "mechanism": candidate.get("mechanism", "")})
+    update_session(session_id, "generate", "ok", {
+        "generator": strategy,
+        "candidate_type": candidate.get("type", "unknown"),
+    })
+    save_session_artifact(session_id, "proposal.json", candidate)
+    emit_event("delta.generated", target, session_id, payload={
+        "delta_id": candidate.get("delta_id"),
+        "operation_count": len(candidate.get("operations", [])),
+    })
+    _add_step(result, "generate", "ok", generator=strategy,
+              candidate_type=candidate.get("type", "unknown"))
     _check_budget(budget, budget_tokens, budget_cost, time.time() - budget_start)
 
+    # ── Gate ──
     gate_module = _load_skill("gate")
     if gate_module:
         gate_result = gate_module.verify(candidate=candidate, target=target)
-        result["pipeline_steps"].append({"step": "gate", "status": "passed" if gate_result.get("passed", False) else "failed", "passed_count": gate_result.get("passed_count", 0), "failed_count": gate_result.get("failed_count", 0), "checks": gate_result.get("checks", [])})
-        if not gate_result.get("passed", False):
+        gate_passed = gate_result.get("passed", False)
+        _add_step(result, "gate", "passed" if gate_passed else "failed",
+                  passed_count=gate_result.get("passed_count", 0),
+                  failed_count=gate_result.get("failed_count", 0))
+        if not gate_passed:
             result["errors"].append(f"Gate failed: {gate_result.get('summary', '')}")
+            update_session(session_id, "gate", "failed", gate_result)
+            emit_event("delta.rejected", target, session_id,
+                       payload={"reason": gate_result.get("summary")})
             cb.record_failure(target, result)
-            result["success"] = False
-            result["budget_used"] = {"tokens": budget_tokens, "time_sec": round(time.time() - budget_start, 2), "cost": round(budget_cost, 4)}
+            update_session(session_id, "gate", "failed")
+            result["budget_used"] = {"tokens": budget_tokens,
+                                     "time_sec": round(time.time() - budget_start, 2),
+                                     "cost": round(budget_cost, 4)}
             return result
     else:
-        result["pipeline_steps"].append({"step": "gate", "status": "skipped", "reason": "gate.skill not available"})
+        _add_step(result, "gate", "skipped", reason="gate.skill not available")
 
+    # ── Policy Evaluation (NEW) ──
+    policy_result = evaluate_policy(
+        _candidate_to_delta(candidate, target, session_id),
+        target=target,
+        session_count=_get_session_count(target),
+    )
+    _add_step(result, "policy", policy_result.get("verdict", "unknown"),
+              reason=policy_result.get("reason"))
+    if policy_result.get("verdict") == "auto_reject":
+        result["errors"].append(f"Policy rejected: {policy_result.get('reason')}")
+        update_session(session_id, "policy", "rejected",
+                       {"reason": policy_result.get("reason")})
+        emit_event("delta.rejected", target, session_id,
+                   payload={"reason": policy_result.get("reason"), "source": "policy"})
+        cb.record_failure(target, result)
+        result["budget_used"] = {"tokens": budget_tokens,
+                                 "time_sec": round(time.time() - budget_start, 2),
+                                 "cost": round(budget_cost, 4)}
+        return result
+    update_session(session_id, "policy", policy_result.get("verdict"))
+
+    # ── Sandbox ──
     sandbox_module = _load_skill("sandbox")
     if sandbox_module is None:
         raise RuntimeError("sandbox.skill not available")
-    sandbox_result = sandbox_module.sandbox(target=target, candidate=candidate, budget=budget, workspace_path=str(EVOLVE_DIR))
+    sandbox_result = sandbox_module.sandbox(
+        target=target, candidate=candidate, budget=budget,
+        workspace_path=str(EVOLVE_DIR)
+    )
     has_error = bool(sandbox_result.get("error"))
-    result["pipeline_steps"].append({"step": "sandbox", "status": "error" if has_error else "ok", "delta": sandbox_result.get("delta", 0), "verdict": sandbox_result.get("verdict", "unknown"), "error": sandbox_result.get("error")})
+    _add_step(result, "sandbox", "error" if has_error else "ok",
+              delta=sandbox_result.get("delta", 0),
+              verdict=sandbox_result.get("verdict", "unknown"))
     budget_used = sandbox_result.get("budget_used", {})
     budget_tokens += budget_used.get("tokens", 0)
     budget_cost += budget_used.get("cost", 0.0)
     _check_budget(budget, budget_tokens, budget_cost, time.time() - budget_start)
     if has_error:
         result["errors"].append(f"Sandbox error: {sandbox_result.get('error', 'unknown')}")
+        update_session(session_id, "sandbox", "failed",
+                       {"error": sandbox_result.get("error")})
+        emit_event("validation.failed", target, session_id,
+                   payload={"error": sandbox_result.get("error"), "tier": "sandbox"})
         cb.record_failure(target, result)
-        result["success"] = False
-        result["budget_used"] = {"tokens": budget_tokens, "time_sec": round(time.time() - budget_start, 2), "cost": round(budget_cost, 4)}
+        result["budget_used"] = {"tokens": budget_tokens,
+                                 "time_sec": round(time.time() - budget_start, 2),
+                                 "cost": round(budget_cost, 4)}
         return result
+    save_session_artifact(session_id, "validation.json", sandbox_result)
+    update_session(session_id, "validation", "passed",
+                   {"delta": sandbox_result.get("delta", 0)})
+    emit_event("validation.passed", target, session_id,
+               payload={"delta": sandbox_result.get("delta", 0)})
 
+    # ── Report ──
     report_module = _load_skill("report")
     if report_module is None:
         raise RuntimeError("report.skill not available")
-        proposal = report_module.build_proposal(target=target, strategy=strategy, traces=traces, report=report, candidate=candidate, sandbox_result=sandbox_result)
-        # Additional validation based on sandbox details
-        sandbox_details = sandbox_result.get("details", {})
-        if sandbox_details.get("verdict") == "rejected":
-            proposal["valid"] = False
-            reason = sandbox_details.get("description", "Golden or security check failed")
-            proposal.setdefault("validation_errors", []).append(f"Proposal rejected: {reason}")
-        # Generate semantic summary using LLM
-        try:
-            from _lib.oc_llm_client import llm_call
-            summary_prompt = f"""You are a senior technical reviewer. Compare the proposed changes against the current skill and summarize the semantic differences in natural language.
-
-Target: {target}
-Candidate type: {candidate.get('type')}
-Mechanism: {candidate.get('mechanism')}
-Description: {candidate.get('description')}
-
-Changes (list): {json.dumps(candidate.get('changes', []), ensure_ascii=False, indent=2)}
-
-Please produce a concise summary (3-5 sentences) highlighting:
-- Any weakening or removal of safety constraints
-- Changes to business logic or policy
-- Any new external dependencies
-"""
-            resp = llm_call(summary_prompt, role="evaluation", temperature=0.2, max_tokens=500)
-            summary = resp["output"].strip()
-            proposal["semantic_summary"] = summary
-        except Exception:
-            proposal["semantic_summary"] = None
-    result["pipeline_steps"].append({"step": "report", "status": "ok" if proposal.get("valid", False) else "validation_failed", "valid": proposal.get("valid", False)})
+    proposal = report_module.build_proposal(
+        target=target, strategy=strategy, traces=traces,
+        report=report, candidate=candidate, sandbox_result=sandbox_result
+    )
+    _add_step(result, "report", "ok" if proposal.get("valid", False) else "validation_failed",
+              valid=proposal.get("valid", False))
     result["proposal"] = proposal
     result["success"] = proposal.get("valid", False)
-    if not result["success"]:
+
+    if result["success"]:
+        cb.record_success(target, result)
+        update_session(session_id, "deploy", "deployed",
+                       outcome={"verdict": "deployed",
+                                "delta_pass_rate": sandbox_result.get("delta", 0),
+                                "delta_tokens": budget_used.get("tokens", 0)})
+        emit_event("delta.applied", target, session_id,
+                   payload={"delta_id": candidate.get("delta_id"),
+                            "pass_rate_delta": sandbox_result.get("delta", 0)})
+        # Record optimization memory
+        try:
+            mem = report_module.build_memory_entry(
+                session_id=session_id,
+                target=target,
+                reflection=reflection,
+                candidate=candidate,
+                sandbox_result=sandbox_result,
+                budget_used=budget_used,
+            )
+            add_opt_memory_entry(**mem)
+            emit_event("experience.added", target, session_id)
+        except Exception:
+            pass  # Non-critical: don't fail pipeline for memory write failure
+    else:
         cb.record_failure(target, result)
+        update_session(session_id, "deploy", "failed",
+                       {"errors": proposal.get("validation_errors", [])})
         warnings = proposal.get("validation_errors", [])
         if warnings:
             result["errors"].extend(warnings)
-    else:
-        cb.record_success(target, result)
 
-    result["budget_used"] = {"tokens": budget_tokens, "time_sec": round(time.time() - budget_start, 2), "cost": round(budget_cost, 4)}
+    result["budget_used"] = {"tokens": budget_tokens,
+                             "time_sec": round(time.time() - budget_start, 2),
+                             "cost": round(budget_cost, 4)}
     return result
+
+
+def _add_step(result: dict, step: str, status: str, **kwargs) -> None:
+    """Add a pipeline step entry to result."""
+    entry = {"step": step, "status": status}
+    entry.update(kwargs)
+    result["pipeline_steps"].append(entry)
+
+
+def _candidate_to_delta(candidate: dict, target: str, session_id: str) -> object:
+    """Convert a candidate dict to a SkillDelta-like object for policy evaluation.
+
+    Returns a duck-typed object with .risk, .operations, .target properties.
+    """
+    class _DuckDelta:
+        def __init__(self, c, t, sid):
+            self.risk = c.get("risk", "low")
+            self.target = t
+            self.session_id = sid
+            ops_raw = c.get("changes", c.get("operations", []))
+            class _DuckOp:
+                def __init__(self, op):
+                    self.type = op.get("type", op.get("action", "unknown"))
+            self.operations = [_DuckOp(op) for op in ops_raw]
+    return _DuckDelta(candidate, target, session_id)
+
+
+def _get_session_count(target: str) -> int:
+    """Get the number of previous sessions for this target."""
+    try:
+        from _lib.session_manager import list_sessions
+        return len(list_sessions(target=target))
+    except Exception:
+        return 0
 
 
 def _check_budget(budget: dict, tokens: int, cost: float, elapsed: float) -> None:
     if elapsed > budget.get("max_time_sec", 300):
-        raise PipelineBudgetExceeded(f"Budget timeout: {round(elapsed, 1)}s > {budget['max_time_sec']}s")
+        raise PipelineBudgetExceeded(
+            f"Budget timeout: {round(elapsed, 1)}s > {budget['max_time_sec']}s"
+        )
     if tokens > budget.get("max_tokens", 50000):
-        raise PipelineBudgetExceeded(f"Budget exceeded: {tokens} tokens > {budget['max_tokens']}")
+        raise PipelineBudgetExceeded(
+            f"Budget exceeded: {tokens} tokens > {budget['max_tokens']}"
+        )
     if cost > budget.get("max_cost", 5.0):
-        raise PipelineBudgetExceeded(f"Budget exceeded: ${round(cost, 2)} > ${budget['max_cost']}")
-
-
-def _record_step_error(result: dict, step_name: str, error: Exception) -> None:
-    err_msg = f"{step_name}.skill error: {error}"
-    result["errors"].append(err_msg)
-    for step in result["pipeline_steps"]:
-        if step["step"] == step_name:
-            step["status"] = "error"
-            step["error"] = err_msg
-            return
-    result["pipeline_steps"].append({"step": step_name, "status": "error", "error": err_msg})
+        raise PipelineBudgetExceeded(
+            f"Budget exceeded: ${round(cost, 2)} > ${budget['max_cost']}"
+        )
 
 
 def _load_skill(name: str):
@@ -197,7 +353,9 @@ def _load_skill(name: str):
     if not os.path.exists(skill_path):
         return None
     try:
-        spec = importlib.util.spec_from_file_location(name, skill_path, loader=SourceFileLoader(name, skill_path))
+        spec = importlib.util.spec_from_file_location(
+            name, skill_path, loader=SourceFileLoader(name, skill_path)
+        )
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module

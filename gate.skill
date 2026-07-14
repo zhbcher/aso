@@ -1,17 +1,28 @@
-"""gate.skill — Candidate verification with strict scope lock."""
+"""gate.skill — Candidate verification with strict scope lock (ASO v2).
+
+Upgraded from v1:
+- Delta operation validation (operation type, reason, risk consistency)
+- Change budget enforcement (max 5 operations, max 50 lines)
+- SkillDelta-aware checks (target path validity, rollback plan)
+- Golden tier regression check (external)
+- Backward compatible with v1 candidate format
+"""
 
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import sys
+from typing import Optional
 
 _lib_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_lib")
 if _lib_dir not in sys.path:
     sys.path.insert(0, _lib_dir)
 from scope_policy import validate_target, denied_substrings, validate_sandbox_path
 
+# v1 compatibility
 _REQUIRED_KEYS = ("type", "mechanism", "changes", "risk", "description")
 _VALID_ACTIONS = {
     "integrate_mechanism",
@@ -22,15 +33,48 @@ _VALID_ACTIONS = {
 }
 _PY_EXTS = (".py", ".skill")
 
+# v2 delta validation
+_VALID_DELTA_OPERATION_TYPES = frozenset({
+    "instruction_add", "instruction_remove", "instruction_modify",
+    "constraint_add", "constraint_remove", "constraint_modify",
+    "step_add", "step_remove", "step_modify",
+    "workflow_reorder",
+    "tool_call_add", "tool_call_remove", "tool_call_modify",
+})
+_MAX_OPERATIONS = 5
+_MAX_CHANGED_LINES = 50
+
 
 def verify(candidate: dict, target: str) -> dict:
+    """Verify a candidate (v1 or v2 format) against all gate checks.
+
+    Supports both:
+    - v1: candidate with "changes" (list of actions)
+    - v2: candidate with "operations" (list of SkillDelta operations)
+
+    Returns:
+        {"passed": bool, "total": int, "passed_count": int,
+         "failed_count": int, "checks": list, "summary": str}
+    """
     checks = [
         _check_structure(candidate),
         _check_scope_lock(candidate, target),
-        _check_changes(candidate),
         _check_risk(candidate),
         _check_mechanism(candidate),
     ]
+
+    # v2 delta checks (if candidate has operations/delta format)
+    if "operations" in candidate or "delta_id" in candidate:
+        checks.extend([
+            _check_delta_operations(candidate),
+            _check_delta_risk_consistency(candidate),
+            _check_delta_rollback(candidate),
+            _check_change_budget(candidate),
+        ])
+    else:
+        # v1 checks
+        checks.append(_check_changes(candidate))
+
     passed = all(item["passed"] for item in checks)
     return {
         "passed": passed,
@@ -41,6 +85,10 @@ def verify(candidate: dict, target: str) -> dict:
         "summary": f"Validation {'passed' if passed else 'failed'}: {sum(1 for item in checks if item['passed'])}/{len(checks)}",
     }
 
+
+# ═══════════════════════════════════════════
+# v1 兼容检查（保留原样）
+# ═══════════════════════════════════════════
 
 def _check_structure(candidate: dict) -> dict:
     missing = [key for key in _REQUIRED_KEYS if key not in candidate]
@@ -113,4 +161,111 @@ def _check_mechanism(candidate: dict) -> dict:
         "name": "mechanism",
         "passed": len(issues) == 0,
         "detail": "; ".join(issues) if issues else f"mechanism: {candidate.get('mechanism', '')}",
+    }
+
+
+# ═══════════════════════════════════════════
+# v2 新增：Delta 检查
+# ═══════════════════════════════════════════
+
+def _check_delta_operations(candidate: dict) -> dict:
+    """Validate each operation's type, target, and reason."""
+    operations = candidate.get("operations", [])
+    if not isinstance(operations, list):
+        return {"name": "delta_operations", "passed": False, "detail": "operations is not a list"}
+
+    issues = []
+    for idx, op in enumerate(operations):
+        op_type = op.get("type", "")
+        if op_type not in _VALID_DELTA_OPERATION_TYPES:
+            issues.append(f"operations[{idx}] unknown type: {op_type}")
+
+        # Check reason
+        reason = op.get("reason", "")
+        if len(reason) < 10:
+            issues.append(f"operations[{idx}] reason too short ({len(reason)} chars, need >= 10)")
+
+        # Check target path
+        target = op.get("target", {})
+        if not target.get("file"):
+            issues.append(f"operations[{idx}] missing target.file")
+        if not target.get("selector_type"):
+            issues.append(f"operations[{idx}] missing target.selector_type")
+        if not target.get("selector"):
+            issues.append(f"operations[{idx}] missing target.selector")
+
+        # Check before/after consistency
+        add_types = {"instruction_add", "constraint_add", "step_add", "tool_call_add"}
+        remove_types = {"instruction_remove", "constraint_remove", "step_remove", "tool_call_remove"}
+        if op_type in add_types and op.get("before") is not None:
+            issues.append(f"operations[{idx}] {op_type}: before must be null")
+        if op_type in remove_types and op.get("after") is not None:
+            issues.append(f"operations[{idx}] {op_type}: after must be null")
+
+    return {
+        "name": "delta_operations",
+        "passed": len(issues) == 0,
+        "detail": "; ".join(issues) if issues else "OK",
+    }
+
+
+def _check_delta_risk_consistency(candidate: dict) -> dict:
+    """Check that risk level is consistent with number of operations."""
+    operations = candidate.get("operations", [])
+    risk = candidate.get("risk", "low")
+    n_ops = len(operations)
+
+    issues = []
+    if risk == "low" and n_ops >= 3:
+        issues.append(f"Low risk with {n_ops} operations (max 2 for low risk)")
+
+    return {
+        "name": "delta_risk_consistency",
+        "passed": len(issues) == 0,
+        "detail": "; ".join(issues) if issues else "OK",
+    }
+
+
+def _check_delta_rollback(candidate: dict) -> dict:
+    """Check that rollback plan exists and is valid."""
+    rollback = candidate.get("rollback_plan")
+    if not rollback:
+        return {"name": "delta_rollback", "passed": False, "detail": "rollback_plan is required"}
+
+    if not isinstance(rollback, dict):
+        return {"name": "delta_rollback", "passed": False, "detail": "rollback_plan must be a dict"}
+
+    rtype = rollback.get("type", "")
+    if rtype not in ("version_restore", "reverse_delta", "manual"):
+        return {"name": "delta_rollback", "passed": False, "detail": f"Invalid rollback type: {rtype}"}
+
+    return {"name": "delta_rollback", "passed": True, "detail": f"rollback type: {rtype}"}
+
+
+def _check_change_budget(candidate: dict) -> dict:
+    """Check change budget: max operations and max estimated lines."""
+    operations = candidate.get("operations", [])
+    n_ops = len(operations)
+
+    issues = []
+    if n_ops > _MAX_OPERATIONS:
+        issues.append(f"Too many operations: {n_ops} (max {_MAX_OPERATIONS})")
+
+    # Estimate changed lines
+    total_lines = 0
+    for op in operations:
+        before = op.get("before", "")
+        after = op.get("after", "")
+        if before:
+            total_lines += len(before.split("\n"))
+        if after:
+            total_lines += len(after.split("\n"))
+
+    if total_lines > _MAX_CHANGED_LINES:
+        issues.append(f"Too many changed lines: ~{total_lines} (max {_MAX_CHANGED_LINES})")
+
+    return {
+        "name": "change_budget",
+        "passed": len(issues) == 0,
+        "detail": "; ".join(issues) if issues else f"{n_ops} ops, ~{total_lines} lines",
     }

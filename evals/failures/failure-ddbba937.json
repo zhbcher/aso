@@ -1,0 +1,32 @@
+{
+  "failure_id": "failure-ddbba937",
+  "task_id": "t1",
+  "target": "planner",
+  "failure_reason": "",
+  "failure_type": "SKILL_DEFECT",
+  "source_session": "",
+  "added_at": "2026-07-14T12:44:49.331329+00:00",
+  "tags": [],
+  "trace": {
+    "task_id": "t1",
+    "timestamp": "2026-07-14T10:00:00Z",
+    "source": "test",
+    "total_tokens": 1000,
+    "total_duration_ms": 500,
+    "agent": {
+      "id": "planner",
+      "version": "v1",
+      "success": false,
+      "latency_ms": 200
+    },
+    "skills": [
+      {
+        "id": "Read",
+        "version": "v1",
+        "success": true,
+        "retry_count": 0
+      }
+    ],
+    "success": false
+  }
+}

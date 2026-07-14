@@ -1,0 +1,267 @@
+{
+  "schema_version": "v1",
+  "entries": [
+    {
+      "entry_id": "om-f2f5bd5c",
+      "session_id": "s1",
+      "target": "planner",
+      "operation_types": [
+        "constraint_add",
+        "instruction_modify"
+      ],
+      "context": {
+        "failure_pattern": "multi-turn context overflow",
+        "root_cause": "missing compression step"
+      },
+      "delta_summary": "added verification + compression",
+      "outcome": {
+        "pass_rate_delta": 0.08,
+        "tokens_delta": -0.12,
+        "deployed": true,
+        "rolled_back": false
+      },
+      "confidence": 0.85
+    },
+    {
+      "entry_id": "om-adc03bd7",
+      "session_id": "s1",
+      "target": "router",
+      "operation_types": [
+        "instruction_add"
+      ],
+      "context": {
+        "failure_pattern": "bad routing",
+        "root_cause": "missing negative trigger"
+      },
+      "delta_summary": "added negative trigger",
+      "outcome": {
+        "pass_rate_delta": 0.05,
+        "tokens_delta": 0,
+        "deployed": true,
+        "rolled_back": false
+      },
+      "confidence": 0.5
+    },
+    {
+      "entry_id": "om-dcc68ce5",
+      "session_id": "s1",
+      "target": "planner",
+      "operation_types": [
+        "add"
+      ],
+      "context": {
+        "failure_pattern": "a",
+        "root_cause": "b"
+      },
+      "delta_summary": "c",
+      "outcome": {
+        "pass_rate_delta": 0.0,
+        "tokens_delta": 0.0,
+        "deployed": true,
+        "rolled_back": false
+      },
+      "confidence": 0.5
+    },
+    {
+      "entry_id": "om-f1d9e908",
+      "session_id": "s1",
+      "target": "router",
+      "operation_types": [
+        "add"
+      ],
+      "context": {
+        "failure_pattern": "a",
+        "root_cause": "b"
+      },
+      "delta_summary": "c",
+      "outcome": {
+        "pass_rate_delta": 0.0,
+        "tokens_delta": 0.0,
+        "deployed": true,
+        "rolled_back": false
+      },
+      "confidence": 0.5
+    },
+    {
+      "entry_id": "om-b02c74ab",
+      "session_id": "s1",
+      "target": "planner",
+      "operation_types": [
+        "constraint_add",
+        "instruction_modify"
+      ],
+      "context": {
+        "failure_pattern": "a",
+        "root_cause": "b"
+      },
+      "delta_summary": "c",
+      "outcome": {
+        "pass_rate_delta": 0.0,
+        "tokens_delta": 0.0,
+        "deployed": true,
+        "rolled_back": false
+      },
+      "confidence": 0.5
+    },
+    {
+      "entry_id": "om-b1e187b1",
+      "session_id": "s1",
+      "target": "planner",
+      "operation_types": [
+        "instruction_remove"
+      ],
+      "context": {
+        "failure_pattern": "a",
+        "root_cause": "b"
+      },
+      "delta_summary": "c",
+      "outcome": {
+        "pass_rate_delta": 0.0,
+        "tokens_delta": 0.0,
+        "deployed": true,
+        "rolled_back": false
+      },
+      "confidence": 0.5
+    },
+    {
+      "entry_id": "om-bbaadf7c",
+      "session_id": "s1",
+      "target": "planner",
+      "operation_types": [
+        "add"
+      ],
+      "context": {
+        "failure_pattern": "a",
+        "root_cause": "b"
+      },
+      "delta_summary": "c",
+      "outcome": {
+        "pass_rate_delta": 0.0,
+        "tokens_delta": 0.0,
+        "deployed": true,
+        "rolled_back": false
+      },
+      "confidence": 0.3
+    },
+    {
+      "entry_id": "om-28a9d491",
+      "session_id": "s1",
+      "target": "planner",
+      "operation_types": [
+        "add"
+      ],
+      "context": {
+        "failure_pattern": "a",
+        "root_cause": "b"
+      },
+      "delta_summary": "c",
+      "outcome": {
+        "pass_rate_delta": 0.0,
+        "tokens_delta": 0.0,
+        "deployed": true,
+        "rolled_back": false
+      },
+      "confidence": 0.9
+    },
+    {
+      "entry_id": "om-55c387d7",
+      "session_id": "s1",
+      "target": "planner",
+      "operation_types": [
+        "constraint_add"
+      ],
+      "context": {
+        "failure_pattern": "a",
+        "root_cause": "b"
+      },
+      "delta_summary": "c",
+      "outcome": {
+        "pass_rate_delta": 0.1,
+        "tokens_delta": -0.1,
+        "deployed": true,
+        "rolled_back": false
+      },
+      "confidence": 0.8
+    },
+    {
+      "entry_id": "om-81fcc497",
+      "session_id": "s1",
+      "target": "planner",
+      "operation_types": [
+        "constraint_add"
+      ],
+      "context": {
+        "failure_pattern": "a",
+        "root_cause": "b"
+      },
+      "delta_summary": "c",
+      "outcome": {
+        "pass_rate_delta": 0.0,
+        "tokens_delta": 0,
+        "deployed": false,
+        "rolled_back": true
+      },
+      "confidence": 0.8
+    },
+    {
+      "entry_id": "om-2e86a3b4",
+      "session_id": "s1",
+      "target": "router",
+      "operation_types": [
+        "instruction_add"
+      ],
+      "context": {
+        "failure_pattern": "a",
+        "root_cause": "b"
+      },
+      "delta_summary": "c",
+      "outcome": {
+        "pass_rate_delta": 0.0,
+        "tokens_delta": 0.0,
+        "deployed": true,
+        "rolled_back": false
+      },
+      "confidence": 0.5
+    },
+    {
+      "entry_id": "om-8f305836",
+      "session_id": "s1",
+      "target": "planner",
+      "operation_types": [
+        "add"
+      ],
+      "context": {
+        "failure_pattern": "a",
+        "root_cause": "b"
+      },
+      "delta_summary": "c",
+      "outcome": {
+        "pass_rate_delta": 0.0,
+        "tokens_delta": 0.0,
+        "deployed": true,
+        "rolled_back": false
+      },
+      "confidence": 0.5
+    },
+    {
+      "entry_id": "om-8f7ba38c",
+      "session_id": "s1",
+      "target": "router",
+      "operation_types": [
+        "remove"
+      ],
+      "context": {
+        "failure_pattern": "a",
+        "root_cause": "b"
+      },
+      "delta_summary": "c",
+      "outcome": {
+        "pass_rate_delta": 0.0,
+        "tokens_delta": 0.0,
+        "deployed": true,
+        "rolled_back": false
+      },
+      "confidence": 0.5
+    }
+  ]
+}

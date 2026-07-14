@@ -48,5 +48,529 @@
     "manifest_id": "test-001",
     "target": "planner",
     "status": "pending_review"
+  },
+  {
+    "target": "router",
+    "current_version": "v3",
+    "versions": [
+      {
+        "version": "v2",
+        "delta_id": "delta-001",
+        "parent_version": "v1",
+        "deployed_at": "2026-07-14T12:17:47.398795Z"
+      },
+      {
+        "version": "v3",
+        "delta_id": "delta-001",
+        "parent_version": "v2",
+        "deployed_at": "2026-07-14T12:18:03.481125Z"
+      }
+    ],
+    "rollback_target": "v2"
+  },
+  {
+    "target": "planner",
+    "current_version": "v6",
+    "versions": [
+      {
+        "version": "v1",
+        "delta_id": null,
+        "parent_version": null,
+        "deployed_at": "2026-07-14T12:18:03.478305Z"
+      },
+      {
+        "version": "v2",
+        "delta_id": "delta-001",
+        "parent_version": "v1",
+        "deployed_at": "2026-07-14T12:18:03.480302Z"
+      },
+      {
+        "version": "v3",
+        "delta_id": "delta-001",
+        "parent_version": "v2",
+        "deployed_at": "2026-07-14T12:18:03.497617Z"
+      },
+      {
+        "version": "v4",
+        "delta_id": "delta-002",
+        "parent_version": "v3",
+        "deployed_at": "2026-07-14T12:18:03.497904Z"
+      },
+      {
+        "version": "v5",
+        "delta_id": "delta-001",
+        "parent_version": "v4",
+        "deployed_at": "2026-07-14T12:18:03.499854Z"
+      },
+      {
+        "version": "v6",
+        "delta_id": "delta-002",
+        "parent_version": "v5",
+        "deployed_at": "2026-07-14T12:18:03.500092Z"
+      },
+      {
+        "version": "v5 (rollback from v6)",
+        "delta_id": null,
+        "parent_version": "v6",
+        "deployed_at": "2026-07-14T12:18:03.501954Z"
+      },
+      {
+        "version": "v6",
+        "delta_id": "delta-001",
+        "parent_version": "v5",
+        "deployed_at": "2026-07-14T12:18:03.505883Z"
+      }
+    ],
+    "rollback_target": "v5"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
+  },
+  {
+    "manifest_id": "test-001",
+    "target": "planner",
+    "status": "pending_review"
   }
 ]

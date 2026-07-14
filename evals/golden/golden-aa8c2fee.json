@@ -1,0 +1,39 @@
+{
+  "golden_id": "golden-aa8c2fee",
+  "task_id": "t2",
+  "target": "router",
+  "description": "",
+  "expected_outcome": {
+    "success": true,
+    "max_tokens": 2000,
+    "max_steps": 2
+  },
+  "added_by": "",
+  "added_at": "2026-07-14T13:34:22.700537+00:00",
+  "tags": [
+    "b"
+  ],
+  "status": "active",
+  "trace": {
+    "task_id": "t2",
+    "timestamp": "2026-07-14T10:00:00Z",
+    "source": "test",
+    "total_tokens": 1000,
+    "total_duration_ms": 500,
+    "agent": {
+      "id": "router",
+      "version": "v1",
+      "success": true,
+      "latency_ms": 200
+    },
+    "skills": [
+      {
+        "id": "Read",
+        "version": "v1",
+        "success": true,
+        "retry_count": 0
+      }
+    ],
+    "success": true
+  }
+}

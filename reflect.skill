@@ -1,0 +1,260 @@
+"""reflect.skill — Evolution Reflection Layer for ASO v2.
+
+职责: 接收 Diagnose 的统计报告 + 原始 trace，
+      输出根因分析（ReflectionResult）。
+      位于 Diagnose（统计）和 Generate（修改）之间的认知层。
+
+输入:
+  - diagnose 报告（dict，含各维度评分）
+  - 原始 trace 列表（符合 trace_schema v1）
+
+输出:
+  - ReflectionResult（failure_type, root_cause, evidence, recommended_change_type, confidence）
+
+failure_type 分类:
+  - SKILL_DEFECT: 技能本身缺少规则/流程
+  - EXECUTION_LAPSE: 技能规则正确但执行时没遵守
+  - MEMORY_DEFECT: QMD Memory 检索失败
+  - TOOL_DEFECT: 工具调用错误或参数不当
+  - ENVIRONMENT_ISSUE: 外部原因（API 挂了、网络问题等）
+  - UNCLEAR: 不确定
+
+不做:
+  - 不生成修改方案（那是 Generate 的事）
+  - 不输出代码
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Optional, List, Dict
+
+
+FAILURE_TYPES = frozenset({
+    "SKILL_DEFECT",
+    "EXECUTION_LAPSE",
+    "MEMORY_DEFECT",
+    "TOOL_DEFECT",
+    "ENVIRONMENT_ISSUE",
+    "UNCLEAR",
+})
+
+
+def reflect(traces: List[Dict], diagnosis: Optional[Dict] = None) -> Dict:
+    """
+    对 Trace 数据执行根因分析反射。
+
+    Args:
+        traces: 符合 trace_schema v1 的 Trace 列表。
+        diagnosis: 可选的 diagnose 输出，提供统计上下文。
+
+    Returns:
+        dict: ReflectionResult，包含 failure_type、root_cause、evidence、
+              recommended_change_type、confidence。
+    """
+    if not traces:
+        return _empty_reflection("no trace data")
+
+    # 从 diagnosis 提取统计上下文
+    task_quality_score = diagnosis.get("task_quality", {}).get("score", 0.0) if diagnosis else 0.0
+    skill_success_score = diagnosis.get("skill_success", {}).get("score", 0.0) if diagnosis else 0.0
+    tool_eff_score = diagnosis.get("tool_efficiency", {}).get("score", 0.0) if diagnosis else 0.0
+    ctx_util_score = diagnosis.get("context_utilization", {}).get("score", 0.0) if diagnosis else 0.0
+
+    # 分析失败 trace
+    failed_traces = [t for t in traces if not t.get("success", True)]
+    failed_skills = _analyze_failed_skills(traces)
+    long_traces = _analyze_long_traces(traces)
+
+    # 置信度计算（基于样本量和 signal 强度）
+    n = len(traces)
+    n_failed = len(failed_traces)
+    base_confidence = _base_confidence(n)
+
+    # 根因推断
+    result = _infer_root_cause(
+        failed_traces=failed_traces,
+        failed_skills=failed_skills,
+        long_traces=long_traces,
+        task_quality_score=task_quality_score,
+        skill_success_score=skill_success_score,
+        tool_eff_score=tool_eff_score,
+        ctx_util_score=ctx_util_score,
+        n=n,
+        n_failed=n_failed,
+        base_confidence=base_confidence,
+    )
+
+    return result
+
+
+def _infer_root_cause(
+    failed_traces: List[Dict],
+    failed_skills: Dict,
+    long_traces: List[Dict],
+    task_quality_score: float,
+    skill_success_score: float,
+    tool_eff_score: float,
+    ctx_util_score: float,
+    n: int,
+    n_failed: int,
+    base_confidence: float,
+) -> Dict:
+    """Infer root cause from trace analysis."""
+
+    # ---- 信号检测 ----
+    signals = []
+
+    # 信号1: 技能失败率高（SKILL_DEFECT）
+    if n_failed > 0 and n > 0:
+        fail_rate = n_failed / n
+        if fail_rate > 0.3:
+            # 检查是否是特定工具失败
+            top_failed = _top_failed_skill(failed_skills)
+            if top_failed:
+                signals.append({
+                    "type": "TOOL_DEFECT",
+                    "weight": 0.8 * fail_rate,
+                    "detail": f"Tool '{top_failed['skill']}' failed {top_failed['fail_count']}/{top_failed['call_count']} times",
+                    "recommended_change": "tool_call_modify",
+                    "evidence": _build_evidence_from_failed_skills(failed_skills, top_failed),
+                })
+            else:
+                signals.append({
+                    "type": "SKILL_DEFECT",
+                    "weight": 0.7 * fail_rate,
+                    "detail": f"High failure rate: {n_failed}/{n} tasks failed",
+                    "recommended_change": "instruction_modify",
+                    "evidence": [f"{n_failed}/{n} tasks failed, task_quality={task_quality_score:.2f}"],
+                })
+
+    # 信号2: 工具效率低，但成功率正常（EXECUTION_LAPSE）
+    if tool_eff_score < 0.5 and task_quality_score > 0.7:
+        signals.append({
+            "type": "EXECUTION_LAPSE",
+            "weight": 0.6 * (1.0 - tool_eff_score),
+            "detail": f"Low tool efficiency ({tool_eff_score:.2f}) despite good task quality",
+            "recommended_change": "constraint_add",
+            "evidence": [f"tool_efficiency={tool_eff_score:.2f}, task_quality={task_quality_score:.2f}"],
+        })
+
+    # 信号3: 上下文利用率低 + 长 trace（MEMORY_DEFECT）
+    if ctx_util_score < 0.5 and len(long_traces) > 0:
+        signals.append({
+            "type": "MEMORY_DEFECT",
+            "weight": 0.7 * (1.0 - ctx_util_score),
+            "detail": f"Low context utilization ({ctx_util_score:.2f}) with {len(long_traces)} long traces",
+            "recommended_change": "instruction_add",
+            "evidence": [f"context_utilization={ctx_util_score:.2f}, long_traces={len(long_traces)}"],
+        })
+
+    # 信号4: 成功率低但工具效率高（ENVIRONMENT_ISSUE）
+    if task_quality_score < 0.5 and tool_eff_score > 0.7:
+        signals.append({
+            "type": "ENVIRONMENT_ISSUE",
+            "weight": 0.5 * (1.0 - task_quality_score),
+            "detail": f"Low quality ({task_quality_score:.2f}) despite good tool efficiency",
+            "recommended_change": "instruction_add",
+            "evidence": [f"task_quality={task_quality_score:.2f}, tool_efficiency={tool_eff_score:.2f}"],
+        })
+
+    # 无强信号
+    if not signals:
+        return {
+            "failure_type": "UNCLEAR",
+            "root_cause": "No strong failure signal detected",
+            "evidence": [f"task_quality={task_quality_score:.2f}, tool_eff={tool_eff_score:.2f}, "
+                        f"skill_success={skill_success_score:.2f}, ctx_util={ctx_util_score:.2f}"],
+            "recommended_change_type": "instruction_add",
+            "confidence": round(base_confidence * 0.5, 4),
+        }
+
+    # 按 weight 排序，取最强信号
+    signals.sort(key=lambda s: s["weight"], reverse=True)
+    top = signals[0]
+
+    return {
+        "failure_type": top["type"],
+        "root_cause": top["detail"],
+        "evidence": top["evidence"],
+        "recommended_change_type": top["recommended_change"],
+        "confidence": round(min(base_confidence * top["weight"], 0.95), 4),
+    }
+
+
+def _analyze_failed_skills(traces: List[Dict]) -> Dict:
+    """Analyze which skills/tools failed most frequently."""
+    stats = {}
+    for t in traces:
+        for s in t.get("skills", []):
+            sid = s.get("id", "unknown")
+            if sid not in stats:
+                stats[sid] = {"call_count": 0, "fail_count": 0}
+            stats[sid]["call_count"] += 1
+            if not s.get("success", True):
+                stats[sid]["fail_count"] += 1
+    return stats
+
+
+def _top_failed_skill(stats: Dict) -> Optional[Dict]:
+    """Find the skill with highest failure rate (min 3 calls)."""
+    candidates = [
+        {"skill": sid, **s}
+        for sid, s in stats.items()
+        if s["call_count"] >= 3 and s["fail_count"] > 0
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c["fail_count"] / c["call_count"], reverse=True)
+    return candidates[0]
+
+
+def _build_evidence_from_failed_skills(stats: Dict, top: Dict) -> List[str]:
+    """Build evidence strings from failed skill analysis."""
+    evidence = []
+    evidence.append(f"Tool '{top['skill']}': {top['fail_count']}/{top['call_count']} failures ({top['fail_count']/top['call_count']*100:.0f}%)")
+    # Add other failing skills
+    others = sorted(
+        [(sid, s) for sid, s in stats.items() if sid != top['skill'] and s['fail_count'] > 0],
+        key=lambda x: x[1]['fail_count'], reverse=True
+    )[:3]
+    for sid, s in others:
+        evidence.append(f"Tool '{sid}': {s['fail_count']}/{s['call_count']} failures")
+    return evidence
+
+
+def _analyze_long_traces(traces: List[Dict], threshold_tokens: int = 5000) -> List[Dict]:
+    """Find traces that used excessive tokens or steps."""
+    long = []
+    for t in traces:
+        tokens = t.get("total_tokens", 0)
+        skills_count = len(t.get("skills", []))
+        if tokens > threshold_tokens or skills_count > 15:
+            long.append({
+                "task_id": t.get("task_id", "?"),
+                "total_tokens": tokens,
+                "skills_count": skills_count,
+                "success": t.get("success", False),
+            })
+    return long
+
+
+def _base_confidence(n: int) -> float:
+    """Base confidence based on sample size."""
+    if n < 5:
+        return 0.3
+    elif n < 20:
+        return 0.5
+    elif n < 100:
+        return 0.7
+    return 0.85
+
+
+def _empty_reflection(reason: str) -> Dict:
+    return {
+        "failure_type": "UNCLEAR",
+        "root_cause": reason,
+        "evidence": [],
+        "recommended_change_type": "instruction_add",
+        "confidence": 0.0,
+    }

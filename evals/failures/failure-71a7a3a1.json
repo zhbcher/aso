@@ -1,0 +1,25 @@
+{
+  "failure_id": "failure-71a7a3a1",
+  "task_id": "failure-test",
+  "target": "test-planner",
+  "failure_reason": "timeout",
+  "failure_type": "TOOL_DEFECT",
+  "source_session": "",
+  "added_at": "2026-07-14T13:44:49.922642+00:00",
+  "tags": [],
+  "trace": {
+    "task_id": "failure-test",
+    "success": false,
+    "agent": {
+      "id": "test-planner"
+    },
+    "skills": [
+      {
+        "id": "Read",
+        "success": false,
+        "error": "timeout"
+      }
+    ],
+    "total_tokens": 100
+  }
+}
