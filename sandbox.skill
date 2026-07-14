@@ -135,9 +135,49 @@ def sandbox(
         if cand.get("error"):
             return _error_result(str(cand["error"]), budget, time.time() - budget_start, baseline_bench)
         candidate_bench = cand["benchmark"]
+        # Extra evaluations: Golden Dataset, Adversarial Red‑Team, and LLM‑as‑a‑Judge
+        golden_delta_val = 0.0
+        baseline_golden_pr = 0.0
+        candidate_golden_pr = 0.0
+        security_passed = True
+        golden_dir = os.path.join(workspace, "evals", "golden")
+        adversarial_dir = os.path.join(workspace, "evals", "adversarial")
+        if os.path.isdir(golden_dir):
+            baseline_golden = _run_extra_evals(workspace, os.path.join("golden", "golden.json"), budget, env=_sandbox_env)
+            candidate_golden = _run_extra_evals(temp_dir, os.path.join("golden", "golden.json"), budget, env=_sandbox_env)
+            baseline_golden_pr = baseline_golden.get("benchmark", {}).get("pass_rate", {}).get("mean", 0.0)
+            candidate_golden_pr = candidate_golden.get("benchmark", {}).get("pass_rate", {}).get("mean", 0.0)
+            golden_delta_val = candidate_golden_pr - baseline_golden_pr
+        if os.path.isdir(adversarial_dir):
+            candidate_adv = _run_extra_evals(temp_dir, os.path.join("adversarial", "adversarial.json"), budget, env=_sandbox_env)
+            for r in candidate_adv.get("benchmark", {}).get("test_results", []):
+                if r.get("passed"):
+                    security_passed = False
+                    break
+        # LLM‑as‑a‑Judge: compute subjective quality scores
+        try:
+            from _lib.judge import batch_judge
+            if baseline.get("benchmark"):
+                baseline["benchmark"]["judge_metrics"] = batch_judge(baseline["benchmark"]["test_results"])
+            if cand.get("benchmark"):
+                cand["benchmark"]["judge_metrics"] = batch_judge(cand["benchmark"]["test_results"])
+        except Exception:
+            pass  # judge is optional
 
         _enforce_delta_gate(baseline_bench, candidate_bench)
         comparison = _calc_delta(baseline_bench, candidate_bench)
+        # Inject golden and security outcomes into comparison
+        comparison["golden_delta"] = golden_delta_val
+        comparison["baseline_golden_pass_rate"] = baseline_golden_pr
+        comparison["candidate_golden_pass_rate"] = candidate_golden_pr
+        comparison["security_passed"] = security_passed
+        # Adjust verdict if necessary
+        if golden_delta_val < -0.001:
+            comparison["verdict"] = "rejected"
+            comparison["description"] += f"; golden regression {golden_delta_val:.2%}"
+        if not security_passed:
+            comparison["verdict"] = "rejected"
+            comparison["description"] += "; security test failed"
 
         _rollback(snap)
         rollback_needed = False
@@ -224,7 +264,7 @@ def _eval_workspace(work_dir: str, budget: dict, start: float, env: Optional[dic
         raise SandboxBudgetError(f"evals/aso_self_evals.json not found under {work_dir}")
     out_dir = tempfile.mkdtemp(prefix="aso_sandbox_eval_")
     try:
-        proc = _subprocess.run(
+        proc = subprocess.run(
             [
                 sys.executable,
                 os.path.join(work_dir, "optimizer", "eval_runner.py"),
@@ -244,6 +284,25 @@ def _eval_workspace(work_dir: str, budget: dict, start: float, env: Optional[dic
     except Exception as exc:
         return {"benchmark": {}, "error": str(exc)}
 
+
+def _run_extra_evals(work_dir: str, evals_name: str, budget: dict, env: Optional[dict] = None) -> dict:
+    """Run an additional evaluation set (e.g., golden/adversarial)."""
+    evals_file = os.path.join(work_dir, "evals", evals_name)
+    if not os.path.exists(evals_file):
+        return {"benchmark": {}, "error": f"Missing {evals_file}"}
+    out_dir = tempfile.mkdtemp(prefix="aso_extra_eval_")
+    try:
+        result = subprocess.run(
+            [sys.executable, os.path.join(work_dir, "optimizer", "eval_runner.py"),
+             "--skill-path", work_dir, "--evals", evals_file, "--output", out_dir],
+            check=True, capture_output=True, env=env)
+        benchmark_path = os.path.join(out_dir, "benchmark.json")
+        with open(benchmark_path, encoding="utf-8") as fh:
+            benchmark = json.load(fh)
+        benchmark["cost"] = float(benchmark.get("cost", 0.0))
+        return {"benchmark": benchmark, "error": None}
+    except Exception as exc:
+        return {"benchmark": {}, "error": str(exc)}
 
 def _calc_delta(baseline: dict, candidate: dict) -> dict:
     old_pass = float(baseline.get("pass_rate", {}).get("mean", 0.0))

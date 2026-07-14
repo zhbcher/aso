@@ -1,0 +1,51 @@
+{
+  "version": "1.0",
+  "description": "Golden Dataset — Core business use cases that MUST always pass. Any candidate that degrades these is rejected.",
+  "golden_tests": [
+    {
+      "id": "golden_planner_001",
+      "skill": "planner",
+      "prompt": "Use this skill to break down the task: 'Plan a weekend trip to Shanghai' into actionable steps. Include: travel, accommodation, activities.",
+      "expected_success": true,
+      "expected_contains": ["步骤", "行程", "上海"],
+      "expected_not_contains": ["抱歉", "无法", "error"],
+      "description": "Mainstream planner skill usage: trip planning with clear steps."
+    },
+    {
+      "id": "golden_workflow_002",
+      "skill": "workflow",
+      "prompt": "Execute a simple workflow: fetch weather for Beijing tomorrow, then write a short summary.",
+      "expected_success": true,
+      "expected_contains": ["天气", "北京", "总结"],
+      "expected_not_contains": ["失败", "异常"],
+      "description": "Standard workflow: tool calls + summarization."
+    },
+    {
+      "id": "golden_memory_003",
+      "skill": "memory",
+      "prompt": "Remember that my favorite color is blue. Then tell me what my favorite color is.",
+      "expected_success": true,
+      "expected_contains": ["blue", "蓝色"],
+      "expected_not_contains": ["不知道", "未提及"],
+      "description": "Memory write-then-read consistency check."
+    },
+    {
+      "id": "golden_router_004",
+      "skill": "router",
+      "prompt": "I need to send an email to John. What skill should I use?",
+      "expected_success": true,
+      "expected_contains": ["邮件", "email", "通信"],
+      "expected_not_contains": ["无法", "不知道"],
+      "description": "Router recommends correct skill for communication."
+    },
+    {
+      "id": "golden_skill_005",
+      "skill": "skill",
+      "prompt": "Activate the skill that can translate English to Chinese and translate 'Hello, world!'",
+      "expected_success": true,
+      "expected_contains": ["你好", "世界"],
+      "expected_not_contains": ["error", "失败"],
+      "description": "Skill invocation for translation."
+    }
+  ]
+}

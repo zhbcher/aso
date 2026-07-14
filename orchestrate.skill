@@ -128,7 +128,35 @@ def run(
     report_module = _load_skill("report")
     if report_module is None:
         raise RuntimeError("report.skill not available")
-    proposal = report_module.build_proposal(target=target, strategy=strategy, traces=traces, report=report, candidate=candidate, sandbox_result=sandbox_result)
+        proposal = report_module.build_proposal(target=target, strategy=strategy, traces=traces, report=report, candidate=candidate, sandbox_result=sandbox_result)
+        # Additional validation based on sandbox details
+        sandbox_details = sandbox_result.get("details", {})
+        if sandbox_details.get("verdict") == "rejected":
+            proposal["valid"] = False
+            reason = sandbox_details.get("description", "Golden or security check failed")
+            proposal.setdefault("validation_errors", []).append(f"Proposal rejected: {reason}")
+        # Generate semantic summary using LLM
+        try:
+            from _lib.oc_llm_client import llm_call
+            summary_prompt = f"""You are a senior technical reviewer. Compare the proposed changes against the current skill and summarize the semantic differences in natural language.
+
+Target: {target}
+Candidate type: {candidate.get('type')}
+Mechanism: {candidate.get('mechanism')}
+Description: {candidate.get('description')}
+
+Changes (list): {json.dumps(candidate.get('changes', []), ensure_ascii=False, indent=2)}
+
+Please produce a concise summary (3-5 sentences) highlighting:
+- Any weakening or removal of safety constraints
+- Changes to business logic or policy
+- Any new external dependencies
+"""
+            resp = llm_call(summary_prompt, role="evaluation", temperature=0.2, max_tokens=500)
+            summary = resp["output"].strip()
+            proposal["semantic_summary"] = summary
+        except Exception:
+            proposal["semantic_summary"] = None
     result["pipeline_steps"].append({"step": "report", "status": "ok" if proposal.get("valid", False) else "validation_failed", "valid": proposal.get("valid", False)})
     result["proposal"] = proposal
     result["success"] = proposal.get("valid", False)
