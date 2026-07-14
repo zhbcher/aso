@@ -320,5 +320,189 @@
       "hit_rate": 0.6,
       "latency_ms": 15
     }
+  },
+  {
+    "task_id": "test-001",
+    "timestamp": "2026-07-07T10:00:00Z",
+    "source": "test",
+    "total_tokens": 3000,
+    "total_duration_ms": 500,
+    "agent": {
+      "id": "planner",
+      "version": "v1",
+      "success": true,
+      "latency_ms": 200
+    },
+    "skills": [
+      {
+        "id": "Read",
+        "version": "v1",
+        "duration_ms": 50,
+        "tokens": 100,
+        "success": true,
+        "retry_count": 0,
+        "error": null
+      },
+      {
+        "id": "Read",
+        "version": "v1",
+        "duration_ms": 30,
+        "tokens": 80,
+        "success": true,
+        "retry_count": 0,
+        "error": null
+      },
+      {
+        "id": "Bash",
+        "version": "v1",
+        "duration_ms": 100,
+        "tokens": 200,
+        "success": false,
+        "retry_count": 1,
+        "error": "timeout"
+      }
+    ],
+    "memory": {
+      "hit_rate": 0.6,
+      "latency_ms": 15
+    }
+  },
+  {
+    "task_id": "test-001",
+    "timestamp": "2026-07-07T10:00:00Z",
+    "source": "test",
+    "total_tokens": 3000,
+    "total_duration_ms": 500,
+    "agent": {
+      "id": "planner",
+      "version": "v1",
+      "success": true,
+      "latency_ms": 200
+    },
+    "skills": [
+      {
+        "id": "Read",
+        "version": "v1",
+        "duration_ms": 50,
+        "tokens": 100,
+        "success": true,
+        "retry_count": 0,
+        "error": null
+      },
+      {
+        "id": "Read",
+        "version": "v1",
+        "duration_ms": 30,
+        "tokens": 80,
+        "success": true,
+        "retry_count": 0,
+        "error": null
+      },
+      {
+        "id": "Bash",
+        "version": "v1",
+        "duration_ms": 100,
+        "tokens": 200,
+        "success": false,
+        "retry_count": 1,
+        "error": "timeout"
+      }
+    ],
+    "memory": {
+      "hit_rate": 0.6,
+      "latency_ms": 15
+    }
+  },
+  {
+    "task_id": "test-001",
+    "timestamp": "2026-07-07T10:00:00Z",
+    "source": "test",
+    "total_tokens": 3000,
+    "total_duration_ms": 500,
+    "agent": {
+      "id": "planner",
+      "version": "v1",
+      "success": true,
+      "latency_ms": 200
+    },
+    "skills": [
+      {
+        "id": "Read",
+        "version": "v1",
+        "duration_ms": 50,
+        "tokens": 100,
+        "success": true,
+        "retry_count": 0,
+        "error": null
+      },
+      {
+        "id": "Read",
+        "version": "v1",
+        "duration_ms": 30,
+        "tokens": 80,
+        "success": true,
+        "retry_count": 0,
+        "error": null
+      },
+      {
+        "id": "Bash",
+        "version": "v1",
+        "duration_ms": 100,
+        "tokens": 200,
+        "success": false,
+        "retry_count": 1,
+        "error": "timeout"
+      }
+    ],
+    "memory": {
+      "hit_rate": 0.6,
+      "latency_ms": 15
+    }
+  },
+  {
+    "task_id": "test-001",
+    "timestamp": "2026-07-07T10:00:00Z",
+    "source": "test",
+    "total_tokens": 3000,
+    "total_duration_ms": 500,
+    "agent": {
+      "id": "planner",
+      "version": "v1",
+      "success": true,
+      "latency_ms": 200
+    },
+    "skills": [
+      {
+        "id": "Read",
+        "version": "v1",
+        "duration_ms": 50,
+        "tokens": 100,
+        "success": true,
+        "retry_count": 0,
+        "error": null
+      },
+      {
+        "id": "Read",
+        "version": "v1",
+        "duration_ms": 30,
+        "tokens": 80,
+        "success": true,
+        "retry_count": 0,
+        "error": null
+      },
+      {
+        "id": "Bash",
+        "version": "v1",
+        "duration_ms": 100,
+        "tokens": 200,
+        "success": false,
+        "retry_count": 1,
+        "error": "timeout"
+      }
+    ],
+    "memory": {
+      "hit_rate": 0.6,
+      "latency_ms": 15
+    }
   }
 ]

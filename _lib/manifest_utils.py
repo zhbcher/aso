@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+from typing import Any
 
 from _lib.lock_utils import file_lock
 from _lib.path_utils import MANIFESTS_FILE
@@ -50,6 +52,16 @@ def store_manifest(manifest_id: str, manifest: dict) -> bool:
         return True
     except (OSError, json.JSONDecodeError, TimeoutError):
         return False
+
+
+def atomic_write_json(data: Any, path: str | Path) -> None:
+    """Write JSON data atomically using a temporary file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, path)
 
 
 def update_manifest_status(manifest_id: str, new_status: str, extra_fields: dict | None = None) -> bool:

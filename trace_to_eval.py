@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from _lib.manifest_utils import atomic_write_json
+
 
 def load_trace(trace_path: str | Path) -> Any:
     path = Path(trace_path)
@@ -24,15 +26,21 @@ def convert_trace_to_evals(trace_data: dict[str, Any], skill_name: str | None = 
         return []
 
     cases: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
     for entry in entries:
         if not entry.get("failed") and not entry.get("warning"):
             continue
 
         prompt = entry.get("prompt", "")
+        error = (entry.get("error") or "").lower()
+        key = (prompt, error)
+        if key in seen:
+            continue
+        seen.add(key)
+
         assertions: list[str] = []
         assertion_severity = "medium"
 
-        error = (entry.get("error") or "").lower()
         if entry.get("failed"):
             assertions.append("Output must match expected output")
             assertion_severity = "high"
@@ -81,11 +89,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cases = convert_trace_to_evals(trace_data, skill_name=args.skill_name)
     out_path = Path(args.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        json.dumps(cases, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(cases, out_path)
 
     print(
         json.dumps({

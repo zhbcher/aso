@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import statistics
 import sys
@@ -43,6 +44,19 @@ def compute_delta(
     baseline_without: dict[str, Any],
 ) -> dict[str, Any]:
     """Compute performance deltas including multi-dimensional metrics."""
+    # 样本量保护：如果基线总测试数 < 20，不具统计意义
+    total_tests = baseline_with.get("total_tests") or baseline_without.get("total_tests")
+    if total_tests is not None and total_tests < 20:
+        return {
+            "pass_rate_vs_without": 0.0,
+            "pass_rate_vs_old": 0.0,
+            "tokens_vs_old_pct": 0.0,
+            "time_vs_old_pct": 0.0,
+            "tool_call_rate_vs_old": 0.0,
+            "latency_ms_vs_old": 0.0,
+            "verdict": "neutral",
+        }
+
     def _safe_mean(data: dict[str, Any]) -> float:
         return float(data.get("mean", 0.0)) if data else 0.0
 
@@ -75,12 +89,18 @@ def compute_delta(
         "latency_ms_vs_old": new_latency - old_latency,
     }
 
-    if delta["pass_rate_vs_old"] <= 0 and delta["tokens_vs_old_pct"] > 20:
-        delta["verdict"] = "failed"
-    elif delta["pass_rate_vs_old"] > 0 or delta["tokens_vs_old_pct"] < 0:
-        delta["verdict"] = "improved"
+    # Token 膨胀硬上限：增长 >20% 且 Pass Rate 有提升则拒绝；否则维持原有失败判定
+    if delta["tokens_vs_old_pct"] > 20.0:
+        if delta["pass_rate_vs_old"] > 0:
+            delta["verdict"] = "rejected"
+            delta["description"] = f"Token 增长超过 20% ({delta['tokens_vs_old_pct']:.1f}%)，视为敷衍回复"
+        else:
+            delta["verdict"] = "failed"
     else:
-        delta["verdict"] = "neutral"
+        if delta["pass_rate_vs_old"] > 0 or delta["tokens_vs_old_pct"] < 0:
+            delta["verdict"] = "improved"
+        else:
+            delta["verdict"] = "neutral"
 
     return delta
 
@@ -205,7 +225,11 @@ def init_baseline(skill_path: str, baseline_file: str) -> dict[str, Any]:
         },
     }
     Path(baseline_file).parent.mkdir(parents=True, exist_ok=True)
-    Path(baseline_file).write_text(json.dumps(baseline, indent=2), encoding="utf-8")
+    # Atomic write via temporary file
+    tmp_path = f"{baseline_file}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(baseline, f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, baseline_file)
     return baseline
 
 

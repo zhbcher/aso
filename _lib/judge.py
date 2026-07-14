@@ -6,11 +6,7 @@ Uses a separate LLM to score test outputs on a 1-10 scale along multiple dimensi
 from __future__ import annotations
 
 import json
-import os
-import time
-from typing import Any, Dict, List, Optional
-
-from .oc_llm_client import get_config, get_pipeline_models
+from typing import Any
 
 # Scoring dimensions
 DIMENSIONS = ["correctness", "completeness", "conciseness", "helpfulness", "safety"]
@@ -38,7 +34,7 @@ Return a JSON object with:
 }
 """
 
-def _call_judge_llm(prompt: str, output: str) -> Optional[Dict[str, Any]]:
+def _call_judge_llm(prompt: str, output: str) -> dict[str, Any] | None:
     """Call judge LLM via oc_llm_client using the configured 'evaluation' pipeline."""
     try:
         # Use the same LLM client but choose a stable evaluation model
@@ -63,7 +59,7 @@ def _call_judge_llm(prompt: str, output: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
-def judge_score(test_output: Dict[str, Any]) -> Dict[str, Any]:
+def judge_score(test_output: dict[str, Any]) -> dict[str, Any]:
     """Compute judge scores for a single test result.
 
     Args:
@@ -88,9 +84,8 @@ def judge_score(test_output: Dict[str, Any]) -> Dict[str, Any]:
         "rationale": result.get("rationale", ""),
     }
 
-def batch_judge(test_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def batch_judge(test_results: list[dict[str, Any]]) -> dict[str, Any]:
     """Run judge over a batch of test results and aggregate statistics."""
-    total = len(test_results)
     scored = 0
     overall_scores = []
     dimension_sums = {dim: 0.0 for dim in DIMENSIONS}
